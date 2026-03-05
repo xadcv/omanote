@@ -31,6 +31,9 @@ type model struct {
 	width          int
 	height         int
 	frame          int
+	vis            *Visualizer
+	mon            *AudioMonitor
+	bands          [numBands]float64
 }
 
 // Messages
@@ -91,7 +94,7 @@ func cmdScheduleRefresh() tea.Cmd {
 }
 
 func cmdAnimTick() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
 		return animTickMsg{}
 	})
 }
@@ -191,13 +194,6 @@ var logo = `
 | (_) | | | | | | (_| | | | | (_) | ||  __/
  \___/|_| |_| |_|\__,_|_| |_|\___/ \__\___|`
 
-var soundWaveFrames = []string{
-	" ~~ * ~~ * ~~ ",
-	" * ~~ * ~~ * ~ ",
-	" ~ * ~~ * ~~ * ",
-	" ~~ * ~ * ~~ * ",
-}
-
 func initialModel() model {
 	s := spinner.New(
 		spinner.WithSpinner(spinner.MiniDot),
@@ -206,6 +202,8 @@ func initialModel() model {
 	return model{
 		state:   stateIdle,
 		spinner: s,
+		vis:     NewVisualizer(48000),
+		mon:     NewAudioMonitor(),
 	}
 }
 
@@ -229,7 +227,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyPressMsg:
 		switch msg.String() {
 		case "q", "ctrl+c":
+			m.mon.Stop()
 			return m, tea.Quit
+		case "v":
+			m.vis.CycleMode()
+			return m, nil
 		case "enter", " ":
 			if m.state != stateIdle {
 				return m, nil
@@ -268,6 +270,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "r":
 			return m, tea.Batch(cmdListDevices, cmdCheckStatus)
 		}
+
+	case sampleMsg:
+		m.bands = m.vis.Analyze(msg.samples)
+		return m, cmdReadSamples(m.mon)
 
 	case devicesListedMsg:
 		m.devicesErr = msg.err
@@ -312,6 +318,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				MicMod:   msg.result.MicMod,
 				SysMod:   msg.result.SysMod,
 			}
+			m.mon.Start(sinkName + ".monitor")
+			return m, tea.Batch(cmdReadSamples(m.mon))
 		}
 		return m, nil
 
@@ -319,6 +327,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = stateIdle
 		m.err = msg.err
 		m.runState = RunState{}
+		m.mon.Stop()
 		return m, nil
 
 	case tickRefreshMsg:
@@ -349,8 +358,12 @@ func deviceLabel(d AudioDevice) string {
 
 func (m model) View() tea.View {
 	var b strings.Builder
+	contentWidth := 80
 
-	// Animated gradient logo
+	padStyle := lipgloss.NewStyle().Width(contentWidth)
+	_ = padStyle
+
+	// --- Rainbow logo ---
 	for i, line := range strings.Split(logo, "\n") {
 		if line == "" {
 			continue
@@ -359,16 +372,18 @@ func (m model) View() tea.View {
 		b.WriteString("\n")
 	}
 
-	// Sound wave animation under logo
-	wave := soundWaveFrames[m.frame%len(soundWaveFrames)]
-	waveStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#8795E8"))
-	b.WriteString("          " + waveStyle.Render(wave))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
-	// Divider
-	divider := dividerStyle.Render(strings.Repeat("~", 44))
+	// --- Visualizer ---
+	visOutput := m.vis.Render(m.bands)
+	if visOutput != "" {
+		b.WriteString(visOutput)
+		b.WriteString("\n")
+	}
 
-	// Status section
+	b.WriteString("\n")
+
+	// --- Status box ---
 	var statusContent strings.Builder
 	switch m.state {
 	case stateStarting:
@@ -378,12 +393,23 @@ func (m model) View() tea.View {
 	default:
 		if m.runState.Running {
 			statusContent.WriteString(runningStyle.Render("  ** Omanote is LIVE **"))
-			statusContent.WriteString("\n\n")
-			statusContent.WriteString(labelStyle.Render("  mic loopback ") + valueStyle.Render("module "+m.runState.MicMod))
-			statusContent.WriteString("\n")
-			statusContent.WriteString(labelStyle.Render("  sys loopback ") + valueStyle.Render("module "+m.runState.SysMod))
-			statusContent.WriteString("\n")
-			statusContent.WriteString(labelStyle.Render("  null sink    ") + valueStyle.Render("module "+m.runState.SinkMod))
+			// Show device descriptions for mic and system audio
+			micDesc := ""
+			if m.selectedSource < len(m.sources) {
+				micDesc = deviceLabel(m.sources[m.selectedSource])
+			}
+			sysDesc := ""
+			if m.selectedSink < len(m.sinks) {
+				sysDesc = deviceLabel(m.sinks[m.selectedSink])
+			}
+			if micDesc != "" {
+				statusContent.WriteString("\n")
+				statusContent.WriteString(labelStyle.Render("  mic ") + valueStyle.Render(micDesc))
+			}
+			if sysDesc != "" {
+				statusContent.WriteString("\n")
+				statusContent.WriteString(labelStyle.Render("  sys ") + valueStyle.Render(sysDesc))
+			}
 		} else {
 			statusContent.WriteString(stoppedStyle.Render("  ~ sleeping ~"))
 		}
@@ -393,93 +419,122 @@ func (m model) View() tea.View {
 	if m.runState.Running {
 		statusBox = statusBoxRunning
 	}
-	b.WriteString(statusBox.Render(statusContent.String()))
+	b.WriteString(statusBox.Width(contentWidth - 2).Render(statusContent.String()))
 	b.WriteString("\n\n")
 
-	// Device selection
-	b.WriteString(divider)
-	b.WriteString("\n")
-
-	canSelect := m.state == stateIdle && !m.runState.Running
-
-	// Microphone panel
-	if m.focusPanel == 0 && canSelect {
-		b.WriteString(subtitleStyle.Render("  Microphone"))
-	} else {
-		b.WriteString(dimSubtitleStyle.Render("  Microphone"))
-	}
-	b.WriteString("\n")
-	for i, s := range m.sources {
-		label := deviceLabel(s)
-		if i == m.selectedSource {
-			if m.focusPanel == 0 && canSelect {
-				b.WriteString(cursorStyle.Render("  > ") + valueStyle.Render(label))
-			} else {
-				b.WriteString("  > " + dimValueStyle.Render(label))
-			}
-		} else {
-			b.WriteString(keyDescStyle.Render("    " + label))
-		}
-		b.WriteString("\n")
-	}
-	if len(m.sources) == 0 {
-		b.WriteString(errStyle.Render("    no microphones found"))
-		b.WriteString("\n")
-	}
-
-	b.WriteString("\n")
-
-	// System Audio panel
-	if m.focusPanel == 1 && canSelect {
-		b.WriteString(subtitleStyle.Render("  System Audio"))
-	} else {
-		b.WriteString(dimSubtitleStyle.Render("  System Audio"))
-	}
-	b.WriteString("\n")
-	for i, s := range m.sinks {
-		label := deviceLabel(s)
-		if i == m.selectedSink {
-			if m.focusPanel == 1 && canSelect {
-				b.WriteString(cursorStyle.Render("  > ") + valueStyle.Render(label))
-			} else {
-				b.WriteString("  > " + dimValueStyle.Render(label))
-			}
-		} else {
-			b.WriteString(keyDescStyle.Render("    " + label))
-		}
-		b.WriteString("\n")
-	}
-	if len(m.sinks) == 0 {
-		b.WriteString(errStyle.Render("    no output devices found"))
-		b.WriteString("\n")
-	}
-
-	// Errors
+	// --- Errors ---
 	if m.devicesErr != nil {
-		b.WriteString("\n")
 		b.WriteString(errStyle.Render("  !! " + m.devicesErr.Error()))
 		b.WriteString("\n")
 	}
 	if m.err != nil {
-		b.WriteString("\n")
 		b.WriteString(errStyle.Render("  !! " + m.err.Error()))
 		b.WriteString("\n")
 	}
 
-	// Controls
-	b.WriteString("\n")
-	b.WriteString(divider)
-	b.WriteString("\n")
-	if m.runState.Running {
-		b.WriteString("  " + keyStyle.Render("enter") + keyDescStyle.Render(" stop"))
+	// --- Device panels side by side ---
+	canSelect := m.state == stateIdle && !m.runState.Running
+	panelW := 37
+
+	// Left panel: Microphone
+	var leftB strings.Builder
+	if m.focusPanel == 0 && canSelect {
+		leftB.WriteString(subtitleStyle.Render("Microphone"))
 	} else {
-		b.WriteString("  " + keyStyle.Render("enter") + keyDescStyle.Render(" start"))
+		leftB.WriteString(dimSubtitleStyle.Render("Microphone"))
 	}
-	b.WriteString("  " + keyStyle.Render("tab") + keyDescStyle.Render(" switch"))
-	b.WriteString("  " + keyStyle.Render("\u2191\u2193") + keyDescStyle.Render(" select"))
-	b.WriteString("  " + keyStyle.Render("r") + keyDescStyle.Render(" refresh"))
-	b.WriteString("  " + keyStyle.Render("q") + keyDescStyle.Render(" quit"))
+	leftB.WriteString("\n")
+	for i, s := range m.sources {
+		label := deviceLabel(s)
+		// Truncate label if needed to fit panel width
+		maxLabelW := panelW - 4
+		if len(label) > maxLabelW {
+			label = label[:maxLabelW-1] + "\u2026"
+		}
+		if i == m.selectedSource {
+			if m.focusPanel == 0 && canSelect {
+				leftB.WriteString(cursorStyle.Render("> ") + valueStyle.Render(label))
+			} else {
+				leftB.WriteString("> " + dimValueStyle.Render(label))
+			}
+		} else {
+			leftB.WriteString(keyDescStyle.Render("  " + label))
+		}
+		leftB.WriteString("\n")
+	}
+	if len(m.sources) == 0 {
+		leftB.WriteString(errStyle.Render("  no mics found"))
+		leftB.WriteString("\n")
+	}
+
+	// Right panel: System Audio
+	var rightB strings.Builder
+	if m.focusPanel == 1 && canSelect {
+		rightB.WriteString(subtitleStyle.Render("System Audio"))
+	} else {
+		rightB.WriteString(dimSubtitleStyle.Render("System Audio"))
+	}
+	rightB.WriteString("\n")
+	for i, s := range m.sinks {
+		label := deviceLabel(s)
+		maxLabelW := panelW - 4
+		if len(label) > maxLabelW {
+			label = label[:maxLabelW-1] + "\u2026"
+		}
+		if i == m.selectedSink {
+			if m.focusPanel == 1 && canSelect {
+				rightB.WriteString(cursorStyle.Render("> ") + valueStyle.Render(label))
+			} else {
+				rightB.WriteString("> " + dimValueStyle.Render(label))
+			}
+		} else {
+			rightB.WriteString(keyDescStyle.Render("  " + label))
+		}
+		rightB.WriteString("\n")
+	}
+	if len(m.sinks) == 0 {
+		rightB.WriteString(errStyle.Render("  no outputs found"))
+		rightB.WriteString("\n")
+	}
+
+	leftPanel := boxStyle.Width(panelW).Render(leftB.String())
+	rightPanel := boxStyle.Width(panelW).Render(rightB.String())
+	b.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftPanel, " ", rightPanel))
+	b.WriteString("\n\n")
+
+	// --- Help bar ---
+	var help strings.Builder
+	if m.runState.Running {
+		help.WriteString(keyStyle.Render("enter") + keyDescStyle.Render(" stop"))
+	} else {
+		help.WriteString(keyStyle.Render("enter") + keyDescStyle.Render(" start"))
+	}
+	help.WriteString("  " + keyStyle.Render("v") + keyDescStyle.Render(" "+m.vis.ModeName()))
+	help.WriteString("  " + keyStyle.Render("tab") + keyDescStyle.Render(" switch"))
+	help.WriteString("  " + keyStyle.Render("\u2191\u2193") + keyDescStyle.Render(" select"))
+	help.WriteString("  " + keyStyle.Render("r") + keyDescStyle.Render(" refresh"))
+	help.WriteString("  " + keyStyle.Render("q") + keyDescStyle.Render(" quit"))
+	b.WriteString(help.String())
 	b.WriteString("\n")
 
-	return tea.NewView(b.String())
+	// Center content in the terminal
+	content := b.String()
+
+	// Use a fixed-width wrapper to constrain the content
+	wrappedContent := lipgloss.NewStyle().Width(contentWidth).Render(content)
+
+	// If we have terminal dimensions, center the frame
+	var view tea.View
+	if m.width > 0 && m.height > 0 {
+		placed := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, wrappedContent)
+		view = tea.NewView(placed)
+	} else {
+		view = tea.NewView(wrappedContent)
+	}
+	view.AltScreen = true
+	return view
 }
+
+// keep logoBoxStyle and dividerStyle referenced to avoid unused variable errors
+var _ = logoBoxStyle
+var _ = dividerStyle
