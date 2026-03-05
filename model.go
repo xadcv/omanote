@@ -19,18 +19,29 @@ const (
 )
 
 type model struct {
-	state    appState
-	runState RunState
-	devices  AudioDevices
-	spinner  spinner.Model
-	err      error
-	width    int
-	height   int
-	frame    int // animation tick counter
+	state          appState
+	runState       RunState
+	sources        []AudioDevice
+	sinks          []AudioDevice
+	selectedSource int
+	selectedSink   int
+	focusPanel     int // 0=source, 1=sink
+	devicesErr     error
+	spinner        spinner.Model
+	err            error
+	width          int
+	height         int
+	frame          int
 }
 
 // Messages
-type devicesDetectedMsg struct{ devices AudioDevices }
+type devicesListedMsg struct {
+	sources       []AudioDevice
+	sinks         []AudioDevice
+	defaultSource string
+	defaultSink   string
+	err           error
+}
 type statusCheckedMsg struct{ state RunState }
 type startedMsg struct {
 	result StartResult
@@ -41,17 +52,31 @@ type tickRefreshMsg struct{}
 type animTickMsg struct{}
 
 // Commands
-func cmdDetectDevices() tea.Msg {
-	return devicesDetectedMsg{devices: detectDevices()}
+func cmdListDevices() tea.Msg {
+	sources, srcErr := listSources()
+	sinks, sinkErr := listSinks()
+	var err error
+	if srcErr != nil {
+		err = srcErr
+	} else if sinkErr != nil {
+		err = sinkErr
+	}
+	return devicesListedMsg{
+		sources:       sources,
+		sinks:         sinks,
+		defaultSource: getDefaultSource(),
+		defaultSink:   getDefaultSink(),
+		err:           err,
+	}
 }
 
 func cmdCheckStatus() tea.Msg {
 	return statusCheckedMsg{state: checkRunState()}
 }
 
-func cmdStart(devices AudioDevices) tea.Cmd {
+func cmdStart(micDevice, outputDevice string) tea.Cmd {
 	return func() tea.Msg {
-		result, err := startVirtualMic(devices)
+		result, err := startVirtualMic(micDevice, outputDevice)
 		return startedMsg{result: result, err: err}
 	}
 }
@@ -108,6 +133,9 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("#C774E8"))
 
+	dimSubtitleStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("#8B6AAE"))
+
 	runningStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#04B575"))
@@ -125,12 +153,19 @@ var (
 	valueStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#94D0FF"))
 
+	dimValueStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#6A8FAA"))
+
 	keyStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#FF6AD5"))
 
 	keyDescStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("#8795E8"))
+
+	cursorStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FF6AD5"))
 
 	boxStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -177,7 +212,7 @@ func initialModel() model {
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(
-		cmdDetectDevices,
+		cmdListDevices,
 		cmdCheckStatus,
 		cmdScheduleRefresh(),
 		cmdAnimTick(),
@@ -204,17 +239,61 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.state = stateStopping
 				return m, tea.Batch(m.spinner.Tick, cmdStop)
 			}
-			if m.devices.Err != nil {
+			if len(m.sources) == 0 || len(m.sinks) == 0 || m.devicesErr != nil {
 				return m, nil
 			}
 			m.state = stateStarting
-			return m, tea.Batch(m.spinner.Tick, cmdStart(m.devices))
+			mic := m.sources[m.selectedSource].Name
+			out := m.sinks[m.selectedSink].Name
+			return m, tea.Batch(m.spinner.Tick, cmdStart(mic, out))
+		case "tab":
+			if m.state == stateIdle && !m.runState.Running {
+				m.focusPanel = (m.focusPanel + 1) % 2
+			}
+		case "up", "k":
+			if m.state == stateIdle && !m.runState.Running {
+				if m.focusPanel == 0 && m.selectedSource > 0 {
+					m.selectedSource--
+				} else if m.focusPanel == 1 && m.selectedSink > 0 {
+					m.selectedSink--
+				}
+			}
+		case "down", "j":
+			if m.state == stateIdle && !m.runState.Running {
+				if m.focusPanel == 0 && m.selectedSource < len(m.sources)-1 {
+					m.selectedSource++
+				} else if m.focusPanel == 1 && m.selectedSink < len(m.sinks)-1 {
+					m.selectedSink++
+				}
+			}
 		case "r":
-			return m, tea.Batch(cmdDetectDevices, cmdCheckStatus)
+			return m, tea.Batch(cmdListDevices, cmdCheckStatus)
 		}
 
-	case devicesDetectedMsg:
-		m.devices = msg.devices
+	case devicesListedMsg:
+		m.devicesErr = msg.err
+		m.sources = msg.sources
+		m.sinks = msg.sinks
+		// Auto-select defaults on first load
+		for i, s := range m.sources {
+			if s.Name == msg.defaultSource {
+				m.selectedSource = i
+				break
+			}
+		}
+		for i, s := range m.sinks {
+			if s.Name == msg.defaultSink {
+				m.selectedSink = i
+				break
+			}
+		}
+		// Clamp selection
+		if m.selectedSource >= len(m.sources) {
+			m.selectedSource = max(0, len(m.sources)-1)
+		}
+		if m.selectedSink >= len(m.sinks) {
+			m.selectedSink = max(0, len(m.sinks)-1)
+		}
 		return m, nil
 
 	case statusCheckedMsg:
@@ -261,6 +340,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func deviceLabel(d AudioDevice) string {
+	if d.Description != "" {
+		return d.Description
+	}
+	return d.Name
+}
+
 func (m model) View() tea.View {
 	var b strings.Builder
 
@@ -286,12 +372,12 @@ func (m model) View() tea.View {
 	var statusContent strings.Builder
 	switch m.state {
 	case stateStarting:
-		statusContent.WriteString(m.spinner.View() + " Conjuring virtual mic...")
+		statusContent.WriteString(m.spinner.View() + " Starting Omanote...")
 	case stateStopping:
-		statusContent.WriteString(m.spinner.View() + " Banishing virtual mic...")
+		statusContent.WriteString(m.spinner.View() + " Stopping Omanote...")
 	default:
 		if m.runState.Running {
-			statusContent.WriteString(runningStyle.Render("  ** Virtual Mic is LIVE **"))
+			statusContent.WriteString(runningStyle.Render("  ** Omanote is LIVE **"))
 			statusContent.WriteString("\n\n")
 			statusContent.WriteString(labelStyle.Render("  mic loopback ") + valueStyle.Render(fmt.Sprintf("pid %d", m.runState.MicPID)))
 			statusContent.WriteString("\n")
@@ -310,22 +396,70 @@ func (m model) View() tea.View {
 	b.WriteString(statusBox.Render(statusContent.String()))
 	b.WriteString("\n\n")
 
-	// Audio devices section
+	// Device selection
 	b.WriteString(divider)
 	b.WriteString("\n")
-	b.WriteString(subtitleStyle.Render("  Audio Devices"))
-	b.WriteString("\n\n")
-	if m.devices.Err != nil {
-		b.WriteString(errStyle.Render("  " + m.devices.Err.Error()))
+
+	canSelect := m.state == stateIdle && !m.runState.Running
+
+	// Microphone panel
+	if m.focusPanel == 0 && canSelect {
+		b.WriteString(subtitleStyle.Render("  Microphone"))
+	} else {
+		b.WriteString(dimSubtitleStyle.Render("  Microphone"))
+	}
+	b.WriteString("\n")
+	for i, s := range m.sources {
+		label := deviceLabel(s)
+		if i == m.selectedSource {
+			if m.focusPanel == 0 && canSelect {
+				b.WriteString(cursorStyle.Render("  > ") + valueStyle.Render(label))
+			} else {
+				b.WriteString("  > " + dimValueStyle.Render(label))
+			}
+		} else {
+			b.WriteString(keyDescStyle.Render("    " + label))
+		}
 		b.WriteString("\n")
-	} else if m.devices.DefaultSink != "" {
-		b.WriteString(labelStyle.Render("  speaker ") + valueStyle.Render(m.devices.DefaultSink))
-		b.WriteString("\n")
-		b.WriteString(labelStyle.Render("  mic     ") + valueStyle.Render(m.devices.DefaultSource))
+	}
+	if len(m.sources) == 0 {
+		b.WriteString(errStyle.Render("    no microphones found"))
 		b.WriteString("\n")
 	}
 
-	// Error
+	b.WriteString("\n")
+
+	// System Audio panel
+	if m.focusPanel == 1 && canSelect {
+		b.WriteString(subtitleStyle.Render("  System Audio"))
+	} else {
+		b.WriteString(dimSubtitleStyle.Render("  System Audio"))
+	}
+	b.WriteString("\n")
+	for i, s := range m.sinks {
+		label := deviceLabel(s)
+		if i == m.selectedSink {
+			if m.focusPanel == 1 && canSelect {
+				b.WriteString(cursorStyle.Render("  > ") + valueStyle.Render(label))
+			} else {
+				b.WriteString("  > " + dimValueStyle.Render(label))
+			}
+		} else {
+			b.WriteString(keyDescStyle.Render("    " + label))
+		}
+		b.WriteString("\n")
+	}
+	if len(m.sinks) == 0 {
+		b.WriteString(errStyle.Render("    no output devices found"))
+		b.WriteString("\n")
+	}
+
+	// Errors
+	if m.devicesErr != nil {
+		b.WriteString("\n")
+		b.WriteString(errStyle.Render("  !! " + m.devicesErr.Error()))
+		b.WriteString("\n")
+	}
 	if m.err != nil {
 		b.WriteString("\n")
 		b.WriteString(errStyle.Render("  !! " + m.err.Error()))
@@ -341,6 +475,8 @@ func (m model) View() tea.View {
 	} else {
 		b.WriteString("  " + keyStyle.Render("enter") + keyDescStyle.Render(" start"))
 	}
+	b.WriteString("  " + keyStyle.Render("tab") + keyDescStyle.Render(" switch"))
+	b.WriteString("  " + keyStyle.Render("\u2191\u2193") + keyDescStyle.Render(" select"))
 	b.WriteString("  " + keyStyle.Render("r") + keyDescStyle.Render(" refresh"))
 	b.WriteString("  " + keyStyle.Render("q") + keyDescStyle.Render(" quit"))
 	b.WriteString("\n")

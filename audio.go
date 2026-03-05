@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,7 +11,10 @@ import (
 	"syscall"
 )
 
-const sinkName = "VirtualMic"
+const (
+	sinkName   = "OmanoteMix"
+	sourceName = "Omanote"
+)
 
 func cacheDir() string {
 	base := os.Getenv("XDG_CACHE_HOME")
@@ -23,44 +27,66 @@ func cacheDir() string {
 	return dir
 }
 
-func pidFile() string    { return filepath.Join(cacheDir(), "pids") }
-func moduleFile() string { return filepath.Join(cacheDir(), "module_id") }
+func pidFile() string         { return filepath.Join(cacheDir(), "pids") }
+func moduleFile() string      { return filepath.Join(cacheDir(), "module_id") }
+func remapModuleFile() string { return filepath.Join(cacheDir(), "remap_module_id") }
 
-type AudioDevices struct {
-	DefaultSink   string
-	DefaultSource string
-	Err           error
+type AudioDevice struct {
+	Name        string
+	Description string
 }
 
-func detectDevices() AudioDevices {
-	var d AudioDevices
+type pactlDevice struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
 
-	sinkOut, err := exec.Command("pactl", "get-default-sink").Output()
+func listSources() ([]AudioDevice, error) {
+	out, err := exec.Command("pactl", "-f", "json", "list", "sources").Output()
 	if err != nil {
-		d.Err = fmt.Errorf("no default sink: %w", err)
-		return d
+		return nil, fmt.Errorf("cannot list sources: %w", err)
 	}
-	d.DefaultSink = strings.TrimSpace(string(sinkOut))
-
-	srcOut, err := exec.Command("pactl", "list", "sources", "short").Output()
-	if err != nil {
-		d.Err = fmt.Errorf("cannot list sources: %w", err)
-		return d
+	var raw []pactlDevice
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("cannot parse sources: %w", err)
 	}
-	for _, line := range strings.Split(string(srcOut), "\n") {
-		if line == "" || strings.Contains(line, ".monitor") || strings.Contains(line, sinkName) {
+	var devices []AudioDevice
+	for _, s := range raw {
+		if strings.Contains(s.Name, ".monitor") || strings.Contains(s.Name, sinkName) || s.Name == sourceName {
 			continue
 		}
-		fields := strings.Fields(line)
-		if len(fields) >= 2 {
-			d.DefaultSource = fields[1]
-			break
+		devices = append(devices, AudioDevice{Name: s.Name, Description: s.Description})
+	}
+	return devices, nil
+}
+
+func listSinks() ([]AudioDevice, error) {
+	out, err := exec.Command("pactl", "-f", "json", "list", "sinks").Output()
+	if err != nil {
+		return nil, fmt.Errorf("cannot list sinks: %w", err)
+	}
+	var raw []pactlDevice
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("cannot parse sinks: %w", err)
+	}
+	var devices []AudioDevice
+	for _, s := range raw {
+		if s.Name == sinkName {
+			continue
 		}
+		devices = append(devices, AudioDevice{Name: s.Name, Description: s.Description})
 	}
-	if d.DefaultSource == "" {
-		d.Err = fmt.Errorf("no microphone found")
-	}
-	return d
+	return devices, nil
+}
+
+func getDefaultSource() string {
+	out, _ := exec.Command("pactl", "get-default-source").Output()
+	return strings.TrimSpace(string(out))
+}
+
+func getDefaultSink() string {
+	out, _ := exec.Command("pactl", "get-default-sink").Output()
+	return strings.TrimSpace(string(out))
 }
 
 type RunState struct {
@@ -101,6 +127,7 @@ func checkRunState() RunState {
 	if !allAlive {
 		os.Remove(pidFile())
 		os.Remove(moduleFile())
+		os.Remove(remapModuleFile())
 		s = RunState{}
 	}
 	return s
@@ -112,13 +139,15 @@ type StartResult struct {
 	ModuleID string
 }
 
-func startVirtualMic(devices AudioDevices) (StartResult, error) {
+func startVirtualMic(micDevice, outputDevice string) (StartResult, error) {
 	os.Remove(pidFile())
 	os.Remove(moduleFile())
+	os.Remove(remapModuleFile())
 
+	// 1. Create null sink (mixing point)
 	modOut, err := exec.Command("pactl", "load-module", "module-null-sink",
 		"sink_name="+sinkName,
-		"sink_properties=device.description=VirtualMic",
+		"sink_properties=device.description="+sinkName,
 		"channel_map=stereo",
 	).Output()
 	if err != nil {
@@ -127,24 +156,49 @@ func startVirtualMic(devices AudioDevices) (StartResult, error) {
 	moduleID := strings.TrimSpace(string(modOut))
 	os.WriteFile(moduleFile(), []byte(moduleID), 0o644)
 
+	// 2. Create remap-source so "Omanote" appears as a selectable mic input
+	remapOut, err := exec.Command("pactl", "load-module", "module-remap-source",
+		"source_name="+sourceName,
+		"master="+sinkName+".monitor",
+		"source_properties=device.description="+sourceName,
+	).Output()
+	if err != nil {
+		exec.Command("pactl", "unload-module", moduleID).Run()
+		os.Remove(moduleFile())
+		return StartResult{}, fmt.Errorf("failed to create remap source: %w", err)
+	}
+	remapModuleID := strings.TrimSpace(string(remapOut))
+	os.WriteFile(remapModuleFile(), []byte(remapModuleID), 0o644)
+
+	// 3. Loopback: selected mic → virtual sink
 	micCmd := exec.Command("pw-loopback",
-		"-C", devices.DefaultSource,
+		"-C", micDevice,
 		"-P", sinkName,
 		"-n", "omanote-mic",
 	)
 	micCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := micCmd.Start(); err != nil {
+		exec.Command("pactl", "unload-module", remapModuleID).Run()
+		exec.Command("pactl", "unload-module", moduleID).Run()
+		os.Remove(moduleFile())
+		os.Remove(remapModuleFile())
 		return StartResult{}, fmt.Errorf("mic loopback failed: %w", err)
 	}
 
+	// 4. Loopback: selected output's monitor → virtual sink
 	sysCmd := exec.Command("pw-loopback",
-		"-C", devices.DefaultSink+".monitor",
+		"-C", outputDevice+".monitor",
 		"-P", sinkName,
 		"-n", "omanote-sys",
 	)
 	sysCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := sysCmd.Start(); err != nil {
 		syscall.Kill(micCmd.Process.Pid, syscall.SIGTERM)
+		exec.Command("pactl", "unload-module", remapModuleID).Run()
+		exec.Command("pactl", "unload-module", moduleID).Run()
+		os.Remove(pidFile())
+		os.Remove(moduleFile())
+		os.Remove(remapModuleFile())
 		return StartResult{}, fmt.Errorf("system loopback failed: %w", err)
 	}
 
@@ -167,6 +221,11 @@ func stopVirtualMic() error {
 			}
 		}
 		os.Remove(pidFile())
+	}
+	if data, err := os.ReadFile(remapModuleFile()); err == nil {
+		modID := strings.TrimSpace(string(data))
+		exec.Command("pactl", "unload-module", modID).Run()
+		os.Remove(remapModuleFile())
 	}
 	if data, err := os.ReadFile(moduleFile()); err == nil {
 		modID := strings.TrimSpace(string(data))
