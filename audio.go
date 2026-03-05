@@ -41,6 +41,58 @@ type pactlDevice struct {
 	Description string `json:"description"`
 }
 
+// cleanDescription returns a usable description, falling back to
+// a human-readable form derived from the pactl device name.
+func cleanDescription(desc, name string) string {
+	if desc != "" && desc != "(null)" {
+		return desc
+	}
+	// Extract the USB product portion from names like:
+	//   alsa_input.usb-R__DE_Microphones_R__DE_NT-USB_Mini_48B8D6F7-00.mono-fallback
+	if i := strings.Index(name, "usb-"); i >= 0 {
+		rest := name[i+4:]
+		// Cut at the profile suffix (.mono-fallback, .analog-stereo, etc.)
+		if dot := strings.Index(rest, "."); dot > 0 {
+			rest = rest[:dot]
+		}
+		// Remove serial and interface suffix (e.g. _48B8D6F7-00)
+		// Pattern: _HEXSERIAL-NN at the end
+		for i := len(rest) - 1; i >= 0; i-- {
+			if rest[i] == '_' {
+				candidate := rest[i+1:]
+				// Check if it looks like SERIAL-NN (hex chars, dash, digits)
+				if len(candidate) >= 4 && isHexish(candidate) {
+					rest = rest[:i]
+					break
+				}
+			}
+		}
+		rest = strings.NewReplacer("__", "", "_", " ", "-", " ").Replace(rest)
+		return strings.TrimSpace(rest)
+	}
+	// Fallback: strip common prefixes and clean up.
+	for _, prefix := range []string{"alsa_input.", "alsa_output.", "bluez_input.", "bluez_output."} {
+		name = strings.TrimPrefix(name, prefix)
+	}
+	return name
+}
+
+// isHexish checks if a string looks like a hex serial (possibly with dashes/digits).
+func isHexish(s string) bool {
+	hexCount := 0
+	for _, c := range s {
+		switch {
+		case c >= '0' && c <= '9', c >= 'A' && c <= 'F', c >= 'a' && c <= 'f':
+			hexCount++
+		case c == '-':
+			// allowed separator
+		default:
+			return false
+		}
+	}
+	return hexCount >= 4
+}
+
 func listSources() ([]AudioDevice, error) {
 	out, err := exec.Command("pactl", "-f", "json", "list", "sources").Output()
 	if err != nil {
@@ -55,7 +107,7 @@ func listSources() ([]AudioDevice, error) {
 		if strings.Contains(s.Name, ".monitor") || strings.Contains(s.Name, sinkName) || s.Name == sourceName {
 			continue
 		}
-		devices = append(devices, AudioDevice{Name: s.Name, Description: s.Description})
+		devices = append(devices, AudioDevice{Name: s.Name, Description: cleanDescription(s.Description, s.Name)})
 	}
 	return devices, nil
 }
@@ -74,7 +126,7 @@ func listSinks() ([]AudioDevice, error) {
 		if s.Name == sinkName {
 			continue
 		}
-		devices = append(devices, AudioDevice{Name: s.Name, Description: s.Description})
+		devices = append(devices, AudioDevice{Name: s.Name, Description: cleanDescription(s.Description, s.Name)})
 	}
 	return devices, nil
 }
