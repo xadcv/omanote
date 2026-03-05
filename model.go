@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -308,9 +307,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = nil
 			m.runState = RunState{
 				Running:  true,
-				MicPID:   msg.result.MicPID,
-				SysPID:   msg.result.SysPID,
-				ModuleID: msg.result.ModuleID,
+				SinkMod:  msg.result.SinkMod,
+				RemapMod: msg.result.RemapMod,
+				MicMod:   msg.result.MicMod,
+				SysMod:   msg.result.SysMod,
 			}
 		}
 		return m, nil
@@ -379,11 +379,11 @@ func (m model) View() tea.View {
 		if m.runState.Running {
 			statusContent.WriteString(runningStyle.Render("  ** Omanote is LIVE **"))
 			statusContent.WriteString("\n\n")
-			statusContent.WriteString(labelStyle.Render("  mic loopback ") + valueStyle.Render(fmt.Sprintf("pid %d", m.runState.MicPID)))
+			statusContent.WriteString(labelStyle.Render("  mic loopback ") + valueStyle.Render("module "+m.runState.MicMod))
 			statusContent.WriteString("\n")
-			statusContent.WriteString(labelStyle.Render("  sys loopback ") + valueStyle.Render(fmt.Sprintf("pid %d", m.runState.SysPID)))
+			statusContent.WriteString(labelStyle.Render("  sys loopback ") + valueStyle.Render("module "+m.runState.SysMod))
 			statusContent.WriteString("\n")
-			statusContent.WriteString(labelStyle.Render("  null sink    ") + valueStyle.Render(fmt.Sprintf("module %s", m.runState.ModuleID)))
+			statusContent.WriteString(labelStyle.Render("  null sink    ") + valueStyle.Render("module "+m.runState.SinkMod))
 		} else {
 			statusContent.WriteString(stoppedStyle.Render("  ~ sleeping ~"))
 		}

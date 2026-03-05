@@ -2,9 +2,7 @@
 set -euo pipefail
 
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/omanote"
-PID_FILE="$CACHE_DIR/pids"
-MODULE_FILE="$CACHE_DIR/module_id"
-REMAP_MODULE_FILE="$CACHE_DIR/remap_module_id"
+MODULES_FILE="$CACHE_DIR/modules"
 SINK_NAME="OmanoteMix"
 SOURCE_NAME="Omanote"
 
@@ -12,14 +10,18 @@ mkdir -p "$CACHE_DIR"
 
 die() { echo "error: $*" >&2; exit 1; }
 
-is_running() { [[ -f "$PID_FILE" ]] && kill -0 $(cat "$PID_FILE" | tr '\n' ' ') 2>/dev/null; }
+is_running() {
+    [[ -f "$MODULES_FILE" ]] || return 1
+    local first_mod
+    first_mod=$(head -1 "$MODULES_FILE")
+    pactl list modules short | grep -q "^${first_mod}[[:space:]]"
+}
 
 get_default_sink() {
     pactl get-default-sink
 }
 
 get_default_source() {
-    # Prefer a hardware mic, skip monitors and our own virtual devices
     pactl list sources short | grep -v '\.monitor' | grep -v "$SINK_NAME" | grep -v "$SOURCE_NAME" | head -1 | cut -f2
 }
 
@@ -29,10 +31,9 @@ cmd_start() {
         exit 0
     fi
 
-    # Clean up stale state
-    rm -f "$PID_FILE" "$MODULE_FILE" "$REMAP_MODULE_FILE"
+    rm -f "$MODULES_FILE"
 
-    local default_sink default_source module_id remap_module_id
+    local default_sink default_source sink_mod remap_mod mic_mod sys_mod
 
     default_sink=$(get_default_sink) || die "No default sink found"
     default_source=$(get_default_source) || die "No microphone found"
@@ -41,89 +42,69 @@ cmd_start() {
     echo "Default mic:     $default_source"
 
     # 1. Create null sink (the mixing point)
-    module_id=$(pactl load-module module-null-sink \
+    sink_mod=$(pactl load-module module-null-sink \
         sink_name="$SINK_NAME" \
         "sink_properties=device.description=$SINK_NAME" \
         channel_map=stereo)
-    echo "$module_id" > "$MODULE_FILE"
-    echo "Created null sink: $SINK_NAME (module $module_id)"
+    echo "Created null sink: $SINK_NAME (module $sink_mod)"
 
     # 2. Create remap-source so "Omanote" appears as a selectable mic
-    remap_module_id=$(pactl load-module module-remap-source \
+    remap_mod=$(pactl load-module module-remap-source \
         source_name="$SOURCE_NAME" \
         "master=${SINK_NAME}.monitor" \
         "source_properties=device.description=$SOURCE_NAME")
-    echo "$remap_module_id" > "$REMAP_MODULE_FILE"
-    echo "Created remap source: $SOURCE_NAME (module $remap_module_id)"
+    echo "Created remap source: $SOURCE_NAME (module $remap_mod)"
 
     # 3. Loopback: physical mic → virtual sink
-    pw-loopback -C "$default_source" -P "$SINK_NAME" -n omanote-mic &
-    local mic_pid=$!
+    mic_mod=$(pactl load-module module-loopback \
+        source="$default_source" \
+        sink="$SINK_NAME" \
+        latency_msec=20)
+    echo "Created mic loopback (module $mic_mod)"
 
     # 4. Loopback: system audio monitor → virtual sink
-    pw-loopback -C "${default_sink}.monitor" -P "$SINK_NAME" -n omanote-sys &
-    local sys_pid=$!
+    sys_mod=$(pactl load-module module-loopback \
+        source="${default_sink}.monitor" \
+        sink="$SINK_NAME" \
+        latency_msec=20)
+    echo "Created sys loopback (module $sys_mod)"
 
-    echo "$mic_pid" > "$PID_FILE"
-    echo "$sys_pid" >> "$PID_FILE"
+    # Persist all module IDs
+    printf '%s\n%s\n%s\n%s\n' "$sink_mod" "$remap_mod" "$mic_mod" "$sys_mod" > "$MODULES_FILE"
 
     echo ""
-    echo "Omanote active (PIDs: $mic_pid, $sys_pid)"
+    echo "Omanote active"
     echo "Select \"$SOURCE_NAME\" as your microphone in browser/app settings."
 }
 
 cmd_stop() {
-    local stopped=false
-
-    if [[ -f "$PID_FILE" ]]; then
-        while read -r pid; do
-            if kill "$pid" 2>/dev/null; then
-                echo "Stopped loopback (PID $pid)"
-                stopped=true
-            fi
-        done < "$PID_FILE"
-        rm -f "$PID_FILE"
-    fi
-
-    if [[ -f "$REMAP_MODULE_FILE" ]]; then
-        local remap_module_id
-        remap_module_id=$(cat "$REMAP_MODULE_FILE")
-        if pactl unload-module "$remap_module_id" 2>/dev/null; then
-            echo "Removed remap source (module $remap_module_id)"
-            stopped=true
-        fi
-        rm -f "$REMAP_MODULE_FILE"
-    fi
-
-    if [[ -f "$MODULE_FILE" ]]; then
-        local module_id
-        module_id=$(cat "$MODULE_FILE")
-        if pactl unload-module "$module_id" 2>/dev/null; then
-            echo "Removed null sink (module $module_id)"
-            stopped=true
-        fi
-        rm -f "$MODULE_FILE"
-    fi
-
-    if [[ "$stopped" == false ]]; then
+    if [[ ! -f "$MODULES_FILE" ]]; then
         echo "Not running."
-    else
-        echo "Omanote stopped."
+        return
     fi
+
+    # Unload in reverse order
+    tac "$MODULES_FILE" | while read -r mod_id; do
+        mod_id=$(echo "$mod_id" | tr -d '[:space:]')
+        [[ -z "$mod_id" ]] && continue
+        if pactl unload-module "$mod_id" 2>/dev/null; then
+            echo "Unloaded module $mod_id"
+        fi
+    done
+
+    rm -f "$MODULES_FILE"
+    echo "Omanote stopped."
 }
 
 cmd_status() {
     if is_running 2>/dev/null; then
         echo "Running"
-        echo "  Loopback PIDs: $(cat "$PID_FILE" | tr '\n' ' ')"
-        [[ -f "$MODULE_FILE" ]] && echo "  Null sink module: $(cat "$MODULE_FILE")"
-        [[ -f "$REMAP_MODULE_FILE" ]] && echo "  Remap source module: $(cat "$REMAP_MODULE_FILE")"
+        echo "  Modules: $(cat "$MODULES_FILE" | tr '\n' ' ')"
         echo ""
         echo "Sources:"
         pactl list sources short | grep -E "$SINK_NAME|$SOURCE_NAME|$(get_default_source 2>/dev/null || true)" || true
     else
-        # Clean up stale files
-        rm -f "$PID_FILE" "$MODULE_FILE" "$REMAP_MODULE_FILE"
+        rm -f "$MODULES_FILE"
         echo "Not running."
     fi
 }

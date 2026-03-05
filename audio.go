@@ -6,9 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
-	"syscall"
 )
 
 const (
@@ -27,9 +25,7 @@ func cacheDir() string {
 	return dir
 }
 
-func pidFile() string         { return filepath.Join(cacheDir(), "pids") }
-func moduleFile() string      { return filepath.Join(cacheDir(), "module_id") }
-func remapModuleFile() string { return filepath.Join(cacheDir(), "remap_module_id") }
+func modulesFile() string { return filepath.Join(cacheDir(), "modules") }
 
 type AudioDevice struct {
 	Name        string
@@ -56,11 +52,9 @@ func cleanDescription(desc, name string) string {
 			rest = rest[:dot]
 		}
 		// Remove serial and interface suffix (e.g. _48B8D6F7-00)
-		// Pattern: _HEXSERIAL-NN at the end
 		for i := len(rest) - 1; i >= 0; i-- {
 			if rest[i] == '_' {
 				candidate := rest[i+1:]
-				// Check if it looks like SERIAL-NN (hex chars, dash, digits)
 				if len(candidate) >= 4 && isHexish(candidate) {
 					rest = rest[:i]
 					break
@@ -141,148 +135,134 @@ func getDefaultSink() string {
 	return strings.TrimSpace(string(out))
 }
 
+// RunState tracks the 4 PA modules: null-sink, remap-source, mic-loopback, sys-loopback.
 type RunState struct {
 	Running  bool
-	MicPID   int
-	SysPID   int
-	ModuleID string
+	SinkMod  string
+	RemapMod string
+	MicMod   string
+	SysMod   string
 }
 
 func checkRunState() RunState {
-	var s RunState
-
-	data, err := os.ReadFile(pidFile())
+	data, err := os.ReadFile(modulesFile())
 	if err != nil {
-		return s
+		return RunState{}
 	}
-	pids := strings.Fields(strings.TrimSpace(string(data)))
-
-	allAlive := len(pids) > 0
-	for i, p := range pids {
-		pid, _ := strconv.Atoi(p)
-		if err := syscall.Kill(pid, 0); err != nil {
-			allAlive = false
-		}
-		if i == 0 {
-			s.MicPID = pid
-		}
-		if i == 1 {
-			s.SysPID = pid
-		}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 4 {
+		os.Remove(modulesFile())
+		return RunState{}
 	}
 
-	if modData, err := os.ReadFile(moduleFile()); err == nil {
-		s.ModuleID = strings.TrimSpace(string(modData))
+	// Verify modules are still loaded
+	modList, err := exec.Command("pactl", "list", "modules", "short").Output()
+	if err != nil {
+		return RunState{}
+	}
+	modStr := string(modList)
+	for _, id := range lines {
+		if !strings.Contains(modStr, id+"\t") {
+			os.Remove(modulesFile())
+			return RunState{}
+		}
 	}
 
-	s.Running = allAlive
-	if !allAlive {
-		os.Remove(pidFile())
-		os.Remove(moduleFile())
-		os.Remove(remapModuleFile())
-		s = RunState{}
+	return RunState{
+		Running:  true,
+		SinkMod:  lines[0],
+		RemapMod: lines[1],
+		MicMod:   lines[2],
+		SysMod:   lines[3],
 	}
-	return s
 }
 
 type StartResult struct {
-	MicPID   int
-	SysPID   int
-	ModuleID string
+	SinkMod  string
+	RemapMod string
+	MicMod   string
+	SysMod   string
+}
+
+func loadModule(args ...string) (string, error) {
+	out, err := exec.Command("pactl", append([]string{"load-module"}, args...)...).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func startVirtualMic(micDevice, outputDevice string) (StartResult, error) {
-	os.Remove(pidFile())
-	os.Remove(moduleFile())
-	os.Remove(remapModuleFile())
+	os.Remove(modulesFile())
 
 	// 1. Create null sink (mixing point)
-	modOut, err := exec.Command("pactl", "load-module", "module-null-sink",
+	sinkMod, err := loadModule("module-null-sink",
 		"sink_name="+sinkName,
 		"sink_properties=device.description="+sinkName,
 		"channel_map=stereo",
-	).Output()
+	)
 	if err != nil {
 		return StartResult{}, fmt.Errorf("failed to create null sink: %w", err)
 	}
-	moduleID := strings.TrimSpace(string(modOut))
-	os.WriteFile(moduleFile(), []byte(moduleID), 0o644)
 
 	// 2. Create remap-source so "Omanote" appears as a selectable mic input
-	remapOut, err := exec.Command("pactl", "load-module", "module-remap-source",
+	remapMod, err := loadModule("module-remap-source",
 		"source_name="+sourceName,
 		"master="+sinkName+".monitor",
 		"source_properties=device.description="+sourceName,
-	).Output()
+	)
 	if err != nil {
-		exec.Command("pactl", "unload-module", moduleID).Run()
-		os.Remove(moduleFile())
+		exec.Command("pactl", "unload-module", sinkMod).Run()
 		return StartResult{}, fmt.Errorf("failed to create remap source: %w", err)
 	}
-	remapModuleID := strings.TrimSpace(string(remapOut))
-	os.WriteFile(remapModuleFile(), []byte(remapModuleID), 0o644)
 
 	// 3. Loopback: selected mic → virtual sink
-	micCmd := exec.Command("pw-loopback",
-		"-C", micDevice,
-		"-P", sinkName,
-		"-n", "omanote-mic",
+	micMod, err := loadModule("module-loopback",
+		"source="+micDevice,
+		"sink="+sinkName,
+		"latency_msec=20",
 	)
-	micCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := micCmd.Start(); err != nil {
-		exec.Command("pactl", "unload-module", remapModuleID).Run()
-		exec.Command("pactl", "unload-module", moduleID).Run()
-		os.Remove(moduleFile())
-		os.Remove(remapModuleFile())
+	if err != nil {
+		exec.Command("pactl", "unload-module", remapMod).Run()
+		exec.Command("pactl", "unload-module", sinkMod).Run()
 		return StartResult{}, fmt.Errorf("mic loopback failed: %w", err)
 	}
 
 	// 4. Loopback: selected output's monitor → virtual sink
-	sysCmd := exec.Command("pw-loopback",
-		"-C", outputDevice+".monitor",
-		"-P", sinkName,
-		"-n", "omanote-sys",
+	sysMod, err := loadModule("module-loopback",
+		"source="+outputDevice+".monitor",
+		"sink="+sinkName,
+		"latency_msec=20",
 	)
-	sysCmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := sysCmd.Start(); err != nil {
-		syscall.Kill(micCmd.Process.Pid, syscall.SIGTERM)
-		exec.Command("pactl", "unload-module", remapModuleID).Run()
-		exec.Command("pactl", "unload-module", moduleID).Run()
-		os.Remove(pidFile())
-		os.Remove(moduleFile())
-		os.Remove(remapModuleFile())
+	if err != nil {
+		exec.Command("pactl", "unload-module", micMod).Run()
+		exec.Command("pactl", "unload-module", remapMod).Run()
+		exec.Command("pactl", "unload-module", sinkMod).Run()
 		return StartResult{}, fmt.Errorf("system loopback failed: %w", err)
 	}
 
-	pidData := fmt.Sprintf("%d\n%d\n", micCmd.Process.Pid, sysCmd.Process.Pid)
-	os.WriteFile(pidFile(), []byte(pidData), 0o644)
+	// Persist all module IDs
+	data := fmt.Sprintf("%s\n%s\n%s\n%s\n", sinkMod, remapMod, micMod, sysMod)
+	os.WriteFile(modulesFile(), []byte(data), 0o644)
 
 	return StartResult{
-		MicPID:   micCmd.Process.Pid,
-		SysPID:   sysCmd.Process.Pid,
-		ModuleID: moduleID,
+		SinkMod:  sinkMod,
+		RemapMod: remapMod,
+		MicMod:   micMod,
+		SysMod:   sysMod,
 	}, nil
 }
 
 func stopVirtualMic() error {
-	if data, err := os.ReadFile(pidFile()); err == nil {
-		for _, p := range strings.Fields(string(data)) {
-			pid, _ := strconv.Atoi(p)
-			if pid > 0 {
-				syscall.Kill(pid, syscall.SIGTERM)
-			}
-		}
-		os.Remove(pidFile())
+	data, err := os.ReadFile(modulesFile())
+	if err != nil {
+		return nil
 	}
-	if data, err := os.ReadFile(remapModuleFile()); err == nil {
-		modID := strings.TrimSpace(string(data))
-		exec.Command("pactl", "unload-module", modID).Run()
-		os.Remove(remapModuleFile())
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	// Unload in reverse order (sys-loopback, mic-loopback, remap, sink)
+	for i := len(lines) - 1; i >= 0; i-- {
+		exec.Command("pactl", "unload-module", strings.TrimSpace(lines[i])).Run()
 	}
-	if data, err := os.ReadFile(moduleFile()); err == nil {
-		modID := strings.TrimSpace(string(data))
-		exec.Command("pactl", "unload-module", modID).Run()
-		os.Remove(moduleFile())
-	}
+	os.Remove(modulesFile())
 	return nil
 }
