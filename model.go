@@ -126,11 +126,6 @@ func rainbowText(text string, offset int) string {
 
 // Styles
 var (
-	logoBoxStyle = lipgloss.NewStyle().
-			Bold(true).
-			Padding(0, 1).
-			MarginBottom(1)
-
 	subtitleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("#C774E8"))
@@ -184,8 +179,6 @@ var (
 				BorderForeground(lipgloss.Color("#FF6AD5")).
 				Padding(0, 1)
 
-	dividerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#4B3880"))
 )
 
 var logo = `
@@ -360,9 +353,6 @@ func (m model) View() tea.View {
 	var b strings.Builder
 	contentWidth := 80
 
-	padStyle := lipgloss.NewStyle().Width(contentWidth)
-	_ = padStyle
-
 	// --- Rainbow logo ---
 	for i, line := range strings.Split(logo, "\n") {
 		if line == "" {
@@ -535,6 +525,3 @@ func (m model) View() tea.View {
 	return view
 }
 
-// keep logoBoxStyle and dividerStyle referenced to avoid unused variable errors
-var _ = logoBoxStyle
-var _ = dividerStyle
