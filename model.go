@@ -1,6 +1,9 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -16,6 +19,19 @@ const (
 	stateStarting
 	stateStopping
 )
+
+type recState int
+
+const (
+	recOff    recState = iota
+	recOn
+	recPrompt
+)
+
+func defaultOutputDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Recordings")
+}
 
 type model struct {
 	state          appState
@@ -34,6 +50,12 @@ type model struct {
 	vis            *Visualizer
 	mon            *AudioMonitor
 	bands          [numBands]float64
+	rec            *Recorder
+	recState       recState
+	recStart       time.Time
+	outputDir      string
+	editingDir     bool
+	dirInput       string
 }
 
 // Messages
@@ -179,6 +201,9 @@ var (
 				BorderForeground(lipgloss.Color("#FF6AD5")).
 				Padding(0, 1)
 
+	recStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(lipgloss.Color("#FF4444"))
 )
 
 var logo = `
@@ -193,10 +218,12 @@ func initialModel() model {
 		spinner.WithStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6AD5"))),
 	)
 	return model{
-		state:   stateIdle,
-		spinner: s,
-		vis:     NewVisualizer(48000),
-		mon:     NewAudioMonitor(),
+		state:     stateIdle,
+		spinner:   s,
+		vis:       NewVisualizer(48000),
+		mon:       NewAudioMonitor(),
+		rec:       &Recorder{},
+		outputDir: defaultOutputDir(),
 	}
 }
 
@@ -218,14 +245,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyPressMsg:
+		if m.editingDir {
+			key := msg.String()
+			switch key {
+			case "enter":
+				m.outputDir = m.dirInput
+				m.editingDir = false
+			case "escape":
+				m.editingDir = false
+			case "backspace":
+				if len(m.dirInput) > 0 {
+					m.dirInput = m.dirInput[:len(m.dirInput)-1]
+				}
+			default:
+				if len(key) == 1 {
+					m.dirInput += key
+				}
+			}
+			return m, nil
+		}
+
 		switch msg.String() {
 		case "q", "ctrl+c":
+			if m.editingDir {
+				m.editingDir = false
+				return m, nil
+			}
+			if m.recState == recOn || m.recState == recPrompt {
+				m.rec.Discard()
+			}
 			m.mon.Stop()
 			return m, tea.Quit
 		case "v":
 			m.vis.CycleMode()
 			return m, nil
 		case "enter", " ":
+			if m.editingDir {
+				m.outputDir = m.dirInput
+				m.editingDir = false
+				return m, nil
+			}
 			if m.state != stateIdle {
 				return m, nil
 			}
@@ -261,11 +320,61 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case "r":
+			if m.recState == recPrompt {
+				return m, nil
+			}
+			if m.recState == recOn {
+				m.rec.Stop()
+				m.recState = recPrompt
+				return m, nil
+			}
+			if m.runState.Running {
+				if err := m.rec.Start(); err != nil {
+					m.err = err
+					return m, nil
+				}
+				m.recState = recOn
+				m.recStart = time.Now()
+				return m, nil
+			}
 			return m, tea.Batch(cmdListDevices, cmdCheckStatus)
+		case "R":
+			return m, tea.Batch(cmdListDevices, cmdCheckStatus)
+		case "s":
+			if m.recState == recPrompt {
+				_, err := m.rec.Save(m.outputDir)
+				if err != nil {
+					m.err = err
+				} else {
+					m.err = nil
+				}
+				m.recState = recOff
+				return m, nil
+			}
+		case "d":
+			if m.recState == recPrompt {
+				m.rec.Discard()
+				m.recState = recOff
+				return m, nil
+			}
+		case "o":
+			if m.runState.Running && m.recState != recPrompt && !m.editingDir {
+				m.editingDir = true
+				m.dirInput = m.outputDir
+				return m, nil
+			}
+		case "escape":
+			if m.editingDir {
+				m.editingDir = false
+				return m, nil
+			}
 		}
 
 	case sampleMsg:
 		m.bands = m.vis.Analyze(msg.samples)
+		if m.recState == recOn {
+			m.rec.WriteSamples(msg.samples)
+		}
 		return m, cmdReadSamples(m.mon)
 
 	case devicesListedMsg:
@@ -321,6 +430,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.err = msg.err
 		m.runState = RunState{}
 		m.mon.Stop()
+		if m.recState == recOn {
+			m.rec.Stop()
+			m.recState = recPrompt
+		}
 		return m, nil
 
 	case tickRefreshMsg:
@@ -383,6 +496,12 @@ func (m model) View() tea.View {
 	default:
 		if m.runState.Running {
 			statusContent.WriteString(runningStyle.Render("  ** Omanote is LIVE **"))
+			if m.recState == recOn {
+				elapsed := time.Since(m.recStart)
+				mins := int(elapsed.Minutes())
+				secs := int(elapsed.Seconds()) % 60
+				statusContent.WriteString("  " + recStyle.Render(fmt.Sprintf("● REC %02d:%02d", mins, secs)))
+			}
 			// Show device descriptions for mic and system audio
 			micDesc := ""
 			if m.selectedSource < len(m.sources) {
@@ -399,6 +518,22 @@ func (m model) View() tea.View {
 			if sysDesc != "" {
 				statusContent.WriteString("\n")
 				statusContent.WriteString(labelStyle.Render("  sys ") + valueStyle.Render(sysDesc))
+			}
+			if m.recState != recOff {
+				if m.editingDir {
+					statusContent.WriteString("\n")
+					statusContent.WriteString(labelStyle.Render("  dir ") + valueStyle.Render(m.dirInput+"_"))
+				} else {
+					statusContent.WriteString("\n")
+					statusContent.WriteString(labelStyle.Render("  dir ") + dimValueStyle.Render(m.outputDir))
+				}
+			}
+			if m.recState == recPrompt {
+				elapsed := time.Since(m.recStart)
+				mins := int(elapsed.Minutes())
+				secs := int(elapsed.Seconds()) % 60
+				statusContent.WriteString("\n")
+				statusContent.WriteString(recStyle.Render(fmt.Sprintf("  Recording stopped (%02d:%02d)", mins, secs)))
 			}
 		} else {
 			statusContent.WriteString(stoppedStyle.Render("  ~ sleeping ~"))
@@ -494,16 +629,32 @@ func (m model) View() tea.View {
 
 	// --- Help bar ---
 	var help strings.Builder
-	if m.runState.Running {
-		help.WriteString(keyStyle.Render("enter") + keyDescStyle.Render(" stop"))
+	if m.recState == recPrompt {
+		help.WriteString(keyStyle.Render("s") + keyDescStyle.Render(" save"))
+		help.WriteString("  " + keyStyle.Render("d") + keyDescStyle.Render(" discard"))
+	} else if m.editingDir {
+		help.WriteString(keyStyle.Render("enter") + keyDescStyle.Render(" confirm"))
+		help.WriteString("  " + keyStyle.Render("esc") + keyDescStyle.Render(" cancel"))
 	} else {
-		help.WriteString(keyStyle.Render("enter") + keyDescStyle.Render(" start"))
+		if m.runState.Running {
+			help.WriteString(keyStyle.Render("enter") + keyDescStyle.Render(" stop"))
+			if m.recState == recOn {
+				help.WriteString("  " + keyStyle.Render("r") + keyDescStyle.Render(" stop rec"))
+			} else {
+				help.WriteString("  " + keyStyle.Render("r") + keyDescStyle.Render(" rec"))
+			}
+			help.WriteString("  " + keyStyle.Render("o") + keyDescStyle.Render(" output"))
+		} else {
+			help.WriteString(keyStyle.Render("enter") + keyDescStyle.Render(" start"))
+			help.WriteString("  " + keyStyle.Render("r") + keyDescStyle.Render(" refresh"))
+		}
+		help.WriteString("  " + keyStyle.Render("v") + keyDescStyle.Render(" " + m.vis.ModeName()))
+		if !m.runState.Running {
+			help.WriteString("  " + keyStyle.Render("tab") + keyDescStyle.Render(" switch"))
+			help.WriteString("  " + keyStyle.Render("\u2191\u2193") + keyDescStyle.Render(" select"))
+		}
+		help.WriteString("  " + keyStyle.Render("q") + keyDescStyle.Render(" quit"))
 	}
-	help.WriteString("  " + keyStyle.Render("v") + keyDescStyle.Render(" "+m.vis.ModeName()))
-	help.WriteString("  " + keyStyle.Render("tab") + keyDescStyle.Render(" switch"))
-	help.WriteString("  " + keyStyle.Render("\u2191\u2193") + keyDescStyle.Render(" select"))
-	help.WriteString("  " + keyStyle.Render("r") + keyDescStyle.Render(" refresh"))
-	help.WriteString("  " + keyStyle.Render("q") + keyDescStyle.Render(" quit"))
 	b.WriteString(help.String())
 	b.WriteString("\n")
 
