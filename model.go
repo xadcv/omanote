@@ -510,22 +510,6 @@ func (m model) View() tea.View {
 				statusContent.WriteString("\n")
 				statusContent.WriteString(labelStyle.Render("  sys ") + valueStyle.Render(sysDesc))
 			}
-			if m.recState != recOff {
-				if m.editingDir {
-					statusContent.WriteString("\n")
-					statusContent.WriteString(labelStyle.Render("  dir ") + valueStyle.Render(m.dirInput+"_"))
-				} else {
-					statusContent.WriteString("\n")
-					statusContent.WriteString(labelStyle.Render("  dir ") + dimValueStyle.Render(m.outputDir))
-				}
-			}
-			if m.recState == recPrompt {
-				elapsed := time.Since(m.recStart)
-				mins := int(elapsed.Minutes())
-				secs := int(elapsed.Seconds()) % 60
-				statusContent.WriteString("\n")
-				statusContent.WriteString(recStyle.Render(fmt.Sprintf("  Recording stopped (%02d:%02d)", mins, secs)))
-			}
 		} else {
 			statusContent.WriteString(stoppedStyle.Render("  ~ sleeping ~"))
 		}
@@ -536,7 +520,25 @@ func (m model) View() tea.View {
 		statusBox = statusBoxRunning
 	}
 	b.WriteString(statusBox.Width(contentWidth - 2).Render(statusContent.String()))
-	b.WriteString("\n\n")
+	b.WriteString("\n")
+
+	// --- Recording info (below status box) ---
+	if m.recState != recOff {
+		if m.editingDir {
+			b.WriteString(labelStyle.Render("  dir ") + valueStyle.Render(m.dirInput+"_"))
+		} else {
+			b.WriteString(labelStyle.Render("  dir ") + dimValueStyle.Render(m.outputDir))
+		}
+		b.WriteString("\n")
+	}
+	if m.recState == recPrompt {
+		elapsed := time.Since(m.recStart)
+		mins := int(elapsed.Minutes())
+		secs := int(elapsed.Seconds()) % 60
+		b.WriteString(recStyle.Render(fmt.Sprintf("  Recording stopped (%02d:%02d)", mins, secs)))
+		b.WriteString("\n")
+	}
+	b.WriteString("\n")
 
 	// --- Errors ---
 	if m.devicesErr != nil {
