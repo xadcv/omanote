@@ -267,10 +267,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "q", "ctrl+c":
-			if m.editingDir {
-				m.editingDir = false
-				return m, nil
-			}
 			if m.recState == recOn || m.recState == recPrompt {
 				m.rec.Discard()
 			}
@@ -280,11 +276,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.vis.CycleMode()
 			return m, nil
 		case "enter", " ":
-			if m.editingDir {
-				m.outputDir = m.dirInput
-				m.editingDir = false
-				return m, nil
-			}
 			if m.state != stateIdle {
 				return m, nil
 			}
