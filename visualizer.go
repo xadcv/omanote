@@ -62,19 +62,8 @@ var brailleBit = [4][2]rune{
 	{0x40, 0x80},
 }
 
-// ---------------------------------------------------------------------------
-// Spectrum color palette (Omanote synthwave)
-// ---------------------------------------------------------------------------
-
-var (
-	specLow  = lipgloss.Color("#04B575") // green  — low frequencies / bottom
-	specMid  = lipgloss.Color("#C774E8") // purple — mid frequencies / center
-	specHigh = lipgloss.Color("#FF6AD5") // hot pink — high frequencies / top
-
-	specLowStyle  = lipgloss.NewStyle().Foreground(specLow)
-	specMidStyle  = lipgloss.NewStyle().Foreground(specMid)
-	specHighStyle = lipgloss.NewStyle().Foreground(specHigh)
-)
+// defaultScheme is used when no scheme is set on the Visualizer.
+var defaultScheme = &colorSchemes[0]
 
 // ---------------------------------------------------------------------------
 // Visualizer struct
@@ -89,6 +78,7 @@ type Visualizer struct {
 	Rows    int               // number of terminal rows for the visualizer
 	waveBuf []float64         // raw audio samples for oscilloscope mode
 	frame   uint64            // monotonic frame counter (for animation)
+	Scheme  *ColorScheme      // active color scheme
 }
 
 // NewVisualizer creates a Visualizer configured for the given sample rate.
@@ -103,6 +93,17 @@ func NewVisualizer(sampleRate float64) *Visualizer {
 // CycleMode advances to the next visualization mode, wrapping around.
 func (v *Visualizer) CycleMode() {
 	v.Mode = (v.Mode + 1) % visCount
+}
+
+// visModeByName returns the VisMode for a given name, defaulting to VisBars.
+func visModeByName(name string) VisMode {
+	for m := VisMode(0); m < visCount; m++ {
+		v := &Visualizer{Mode: m}
+		if v.ModeName() == name {
+			return m
+		}
+	}
+	return VisBars
 }
 
 // ModeName returns a human-readable label for the current mode.
@@ -286,16 +287,25 @@ func visBandWidth(b int) int {
 // Helper: spectrum color selection
 // ---------------------------------------------------------------------------
 
+// scheme returns the active color scheme, falling back to the default.
+func (v *Visualizer) scheme() *ColorScheme {
+	if v.Scheme != nil {
+		return v.Scheme
+	}
+	return defaultScheme
+}
+
 // specStyle returns a lipgloss style colored according to the vertical
 // position within the visualizer (0.0 = bottom/low, 1.0 = top/high).
-func specStyle(rowBottom float64) lipgloss.Style {
+func (v *Visualizer) specStyle(rowBottom float64) lipgloss.Style {
+	s := v.scheme()
 	if rowBottom > 0.66 {
-		return specHighStyle
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(s.High))
 	}
 	if rowBottom > 0.33 {
-		return specMidStyle
+		return lipgloss.NewStyle().Foreground(lipgloss.Color(s.Mid))
 	}
-	return specLowStyle
+	return lipgloss.NewStyle().Foreground(lipgloss.Color(s.Low))
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +342,7 @@ func (v *Visualizer) renderBars(bands [numBands]float64) string {
 
 		for i, level := range bands {
 			bw := visBandWidth(i)
-			style := specStyle(rowBottom)
+			style := v.specStyle(rowBottom)
 
 			if level >= rowTop {
 				// Full block for this row.
@@ -375,7 +385,7 @@ func (v *Visualizer) renderBricks(bands [numBands]float64) string {
 
 		for i, level := range bands {
 			bw := visBandWidth(i)
-			style := specStyle(rowThreshold)
+			style := v.specStyle(rowThreshold)
 			if level > rowThreshold {
 				sb.WriteString(style.Render(strings.Repeat("▄", bw)))
 			} else {
@@ -419,7 +429,7 @@ func (v *Visualizer) renderColumns(bands [numBands]float64) string {
 					level = bands[i]
 				}
 
-				style := specStyle(rowBottom)
+				style := v.specStyle(rowBottom)
 				if level >= rowTop {
 					sb.WriteString(style.Render("█"))
 				} else if level > rowBottom {
@@ -510,7 +520,7 @@ func (v *Visualizer) renderWave() string {
 				}
 			}
 
-			style := specStyle(float64(height-1-row) / float64(height))
+			style := v.specStyle(float64(height-1-row) / float64(height))
 			sb.WriteString(style.Render(string(braille)))
 		}
 		lines[row] = sb.String()
@@ -559,7 +569,7 @@ func (v *Visualizer) renderScatter(bands [numBands]float64) string {
 					}
 				}
 
-				style := specStyle(float64(height-1-row) / float64(height))
+				style := v.specStyle(float64(height-1-row) / float64(height))
 				sb.WriteString(style.Render(string(braille)))
 			}
 
@@ -629,7 +639,7 @@ func (v *Visualizer) renderFlame(bands [numBands]float64) string {
 				}
 
 				// Flames are hot pink at the top, purple in the middle, green at the base.
-				style := specStyle(float64(height-1-row) / float64(height))
+				style := v.specStyle(float64(height-1-row) / float64(height))
 				sb.WriteString(style.Render(string(braille)))
 			}
 
@@ -684,9 +694,9 @@ func (v *Visualizer) renderRetro(bands [numBands]float64) string {
 					// Alternating stripes across the sun.
 					isStripe := (row+int(v.frame))%2 == 0
 					if isStripe {
-						sb.WriteString(specHighStyle.Render("█"))
+						sb.WriteString(v.specStyle(1.0).Render("█"))
 					} else {
-						sb.WriteString(specMidStyle.Render("▒"))
+						sb.WriteString(v.specStyle(0.5).Render("▒"))
 					}
 				} else {
 					sb.WriteString(" ")
@@ -708,9 +718,9 @@ func (v *Visualizer) renderRetro(bands [numBands]float64) string {
 				// Wave displacement.
 				waveY := math.Sin(float64(col)*0.2+float64(v.frame)*0.15) * energy * 2.0
 				if math.Abs(waveY) > 0.5 {
-					sb.WriteString(specHighStyle.Render("~"))
+					sb.WriteString(v.specStyle(1.0).Render("~"))
 				} else {
-					sb.WriteString(specMidStyle.Render("─"))
+					sb.WriteString(v.specStyle(0.5).Render("─"))
 				}
 			}
 		} else {
@@ -732,11 +742,11 @@ func (v *Visualizer) renderRetro(bands [numBands]float64) string {
 				isVLine := math.Abs(math.Mod(gridX+0.5, 8.0)-4.0) < 0.5
 
 				if isHLine && isVLine {
-					sb.WriteString(specMidStyle.Render("+"))
+					sb.WriteString(v.specStyle(0.5).Render("+"))
 				} else if isHLine {
-					sb.WriteString(specLowStyle.Render("─"))
+					sb.WriteString(v.specStyle(0.0).Render("─"))
 				} else if isVLine {
-					sb.WriteString(specLowStyle.Render("│"))
+					sb.WriteString(v.specStyle(0.0).Render("│"))
 				} else {
 					sb.WriteString(" ")
 				}
@@ -844,7 +854,7 @@ func (v *Visualizer) renderPulse(bands [numBands]float64) string {
 				normDist = 1
 			}
 
-			style := specStyle(normDist)
+			style := v.specStyle(normDist)
 			sb.WriteString(style.Render(string(braille)))
 		}
 		lines[row] = sb.String()

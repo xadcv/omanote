@@ -56,6 +56,8 @@ type model struct {
 	outputDir      string
 	editingDir     bool
 	dirInput       string
+	schemeIdx      int
+	cfg            Config
 }
 
 // Messages
@@ -121,16 +123,7 @@ func cmdAnimTick() tea.Cmd {
 	})
 }
 
-// Gradient palette for the logo
-var gradientColors = []string{
-	"#FF6AD5", // pink
-	"#C774E8", // purple
-	"#AD8CFF", // lavender
-	"#8795E8", // periwinkle
-	"#94D0FF", // sky blue
-}
-
-func rainbowText(text string, offset int) string {
+func rainbowText(text string, offset int, gradient []string) string {
 	var b strings.Builder
 	ci := offset
 	for _, ch := range text {
@@ -138,7 +131,7 @@ func rainbowText(text string, offset int) string {
 			b.WriteRune(ch)
 			continue
 		}
-		color := gradientColors[ci%len(gradientColors)]
+		color := gradient[ci%len(gradient)]
 		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(color))
 		b.WriteString(style.Render(string(ch)))
 		ci++
@@ -217,13 +210,20 @@ func initialModel() model {
 		spinner.WithSpinner(spinner.MiniDot),
 		spinner.WithStyle(lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6AD5"))),
 	)
+	cfg := loadConfig()
+	schemeIdx := colorSchemeByName(cfg.ColorScheme)
+	vis := NewVisualizer(48000)
+	vis.Scheme = &colorSchemes[schemeIdx]
+	vis.Mode = visModeByName(cfg.VisMode)
 	return model{
 		state:     stateIdle,
 		spinner:   s,
-		vis:       NewVisualizer(48000),
+		vis:       vis,
 		mon:       NewAudioMonitor(),
 		rec:       &Recorder{},
-		outputDir: defaultOutputDir(),
+		outputDir: cfg.OutputDir,
+		schemeIdx: schemeIdx,
+		cfg:       cfg,
 	}
 }
 
@@ -251,6 +251,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				m.outputDir = m.dirInput
 				m.editingDir = false
+				m.cfg.OutputDir = m.outputDir
+				saveConfig(m.cfg)
 			case "escape":
 				m.editingDir = false
 			case "backspace":
@@ -274,6 +276,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "v":
 			m.vis.CycleMode()
+			m.cfg.VisMode = m.vis.ModeName()
+			saveConfig(m.cfg)
+			return m, nil
+		case "c":
+			m.schemeIdx = (m.schemeIdx + 1) % len(colorSchemes)
+			m.vis.Scheme = &colorSchemes[m.schemeIdx]
+			m.cfg.ColorScheme = colorSchemes[m.schemeIdx].Name
+			saveConfig(m.cfg)
 			return m, nil
 		case "enter", " ":
 			if m.state != stateIdle {
@@ -289,6 +299,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateStarting
 			mic := m.sources[m.selectedSource].Name
 			out := m.sinks[m.selectedSink].Name
+			m.cfg.PreferredSource = mic
+			m.cfg.PreferredSink = out
+			saveConfig(m.cfg)
 			return m, tea.Batch(m.spinner.Tick, cmdStart(mic, out))
 		case "tab":
 			if m.state == stateIdle && !m.runState.Running {
@@ -370,28 +383,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case devicesListedMsg:
 		m.devicesErr = msg.err
+
+		// Remember current selection by name before updating lists.
+		prevSource := ""
+		if m.selectedSource < len(m.sources) {
+			prevSource = m.sources[m.selectedSource].Name
+		}
+		prevSink := ""
+		if m.selectedSink < len(m.sinks) {
+			prevSink = m.sinks[m.selectedSink].Name
+		}
+
 		m.sources = msg.sources
 		m.sinks = msg.sinks
-		// Auto-select defaults on first load
-		for i, s := range m.sources {
-			if s.Name == msg.defaultSource {
-				m.selectedSource = i
-				break
-			}
-		}
-		for i, s := range m.sinks {
-			if s.Name == msg.defaultSink {
-				m.selectedSink = i
-				break
-			}
-		}
-		// Clamp selection
-		if m.selectedSource >= len(m.sources) {
-			m.selectedSource = max(0, len(m.sources)-1)
-		}
-		if m.selectedSink >= len(m.sinks) {
-			m.selectedSink = max(0, len(m.sinks)-1)
-		}
+
+		// Restore selection by name. Priority: previous selection > config preferred > system default.
+		m.selectedSource = findDevice(m.sources, prevSource, m.cfg.PreferredSource, msg.defaultSource)
+		m.selectedSink = findDevice(m.sinks, prevSink, m.cfg.PreferredSink, msg.defaultSink)
 		return m, nil
 
 	case statusCheckedMsg:
@@ -429,9 +437,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tickRefreshMsg:
 		if m.state == stateIdle {
-			return m, tea.Batch(cmdCheckStatus, cmdScheduleRefresh())
+			return m, tea.Batch(cmdListDevices, cmdCheckStatus, cmdScheduleRefresh())
 		}
-		return m, cmdScheduleRefresh()
+		return m, tea.Batch(cmdCheckStatus, cmdScheduleRefresh())
 
 	case animTickMsg:
 		m.frame++
@@ -446,6 +454,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// findDevice returns the index of the first matching device name from candidates.
+// Falls back to 0 if none match.
+func findDevice(devices []AudioDevice, names ...string) int {
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		for i, d := range devices {
+			if d.Name == name {
+				return i
+			}
+		}
+	}
+	return 0
+}
+
 func deviceLabel(d AudioDevice) string {
 	if d.Description != "" {
 		return d.Description
@@ -458,11 +482,12 @@ func (m model) View() tea.View {
 	contentWidth := 80
 
 	// --- Rainbow logo ---
+	gradient := colorSchemes[m.schemeIdx].Gradient
 	for i, line := range strings.Split(logo, "\n") {
 		if line == "" {
 			continue
 		}
-		b.WriteString(rainbowText(line, m.frame+i))
+		b.WriteString(rainbowText(line, m.frame+i, gradient))
 		b.WriteString("\n")
 	}
 
@@ -642,6 +667,7 @@ func (m model) View() tea.View {
 			help.WriteString("  " + keyStyle.Render("r") + keyDescStyle.Render(" refresh"))
 		}
 		help.WriteString("  " + keyStyle.Render("v") + keyDescStyle.Render(" " + m.vis.ModeName()))
+		help.WriteString("  " + keyStyle.Render("c") + keyDescStyle.Render(" " + colorSchemes[m.schemeIdx].Name))
 		if !m.runState.Running {
 			help.WriteString("  " + keyStyle.Render("tab") + keyDescStyle.Render(" switch"))
 			help.WriteString("  " + keyStyle.Render("\u2191\u2193") + keyDescStyle.Render(" select"))
