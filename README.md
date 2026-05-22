@@ -61,16 +61,36 @@ go build -o omanote
 omanote
 ```
 
+`omanote` opens the TUI. The same binary also exposes a background controller for menu-bar integrations:
+
+```sh
+omanote daemon
+omanote start
+omanote stop
+omanote record start
+omanote record stop
+omanote record save
+omanote record discard
+omanote status --follow --waybar
+omanote menu
+omanote autostart enable
+```
+
+On Omarchy, the Waybar item uses `omanote status --follow --waybar`; left-click opens/focuses the floating TUI and right-click opens the Omanote action menu.
+The TUI's start-on-login toggle controls whether the daemon starts on future logins; it does not stop the current session.
+
 ### Controls
 
 | Key | Action |
 |---|---|
 | `Enter` / `Space` | Start or stop the virtual mic |
+| `a` | Toggle Omanote daemon start on login |
 | `v` | Cycle visualizer mode |
 | `Tab` | Switch between Microphone and System Audio panels |
 | `Up` / `Down` / `j` / `k` | Select device |
-| `r` | Refresh audio device detection |
-| `q` / `Ctrl+C` | Quit |
+| `r` | Start/stop recording while live; refresh devices while stopped |
+| `s` / `d` | Save or discard a stopped recording |
+| `q` / `Ctrl+C` | Close the TUI |
 
 ### Visualizer Modes
 

@@ -24,12 +24,13 @@ type AudioMonitor struct {
 	stdout  io.ReadCloser
 	mu      sync.Mutex
 	samples []float64
+	sampleC chan []float64
 	running bool
 }
 
 // NewAudioMonitor creates an idle AudioMonitor.
 func NewAudioMonitor() *AudioMonitor {
-	return &AudioMonitor{}
+	return &AudioMonitor{sampleC: make(chan []float64, 8)}
 }
 
 // Start spawns parec to capture audio from the given device.
@@ -95,7 +96,13 @@ func (m *AudioMonitor) readLoop() {
 
 		m.mu.Lock()
 		m.samples = samples
+		sampleC := m.sampleC
 		m.mu.Unlock()
+
+		select {
+		case sampleC <- samples:
+		default:
+		}
 	}
 }
 
@@ -141,6 +148,11 @@ func (m *AudioMonitor) IsRunning() bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.running
+}
+
+// SampleChan delivers fresh audio chunks as they are read from parec.
+func (m *AudioMonitor) SampleChan() <-chan []float64 {
+	return m.sampleC
 }
 
 // ---------------------------------------------------------------------------

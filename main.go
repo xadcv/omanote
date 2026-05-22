@@ -8,9 +8,13 @@ import (
 )
 
 func main() {
-	p := tea.NewProgram(initialModel())
-	if _, err := p.Run(); err != nil {
+	if err := runCLI(os.Args[1:]); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+func teaProgram() *tea.Program {
+	p := tea.NewProgram(initialModel())
+	return p
 }

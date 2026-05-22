@@ -7,15 +7,15 @@ import (
 	"strings"
 	"time"
 
-	tea "charm.land/bubbletea/v2"
 	"charm.land/bubbles/v2/spinner"
+	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 )
 
 type appState int
 
 const (
-	stateIdle     appState = iota
+	stateIdle appState = iota
 	stateStarting
 	stateStopping
 )
@@ -23,7 +23,7 @@ const (
 type recState int
 
 const (
-	recOff    recState = iota
+	recOff recState = iota
 	recOn
 	recPrompt
 )
@@ -50,14 +50,14 @@ type model struct {
 	vis            *Visualizer
 	mon            *AudioMonitor
 	bands          [numBands]float64
-	rec            *Recorder
 	recState       recState
-	recStart       time.Time
+	recElapsed     time.Duration
 	outputDir      string
 	editingDir     bool
 	dirInput       string
 	schemeIdx      int
 	cfg            Config
+	autostart      bool
 }
 
 // Messages
@@ -68,7 +68,10 @@ type devicesListedMsg struct {
 	defaultSink   string
 	err           error
 }
-type statusCheckedMsg struct{ state RunState }
+type statusCheckedMsg struct {
+	status DaemonStatus
+	err    error
+}
 type startedMsg struct {
 	result StartResult
 	err    error
@@ -76,6 +79,15 @@ type startedMsg struct {
 type stoppedMsg struct{ err error }
 type tickRefreshMsg struct{}
 type animTickMsg struct{}
+type daemonCommandMsg struct {
+	status  DaemonStatus
+	message string
+	err     error
+}
+type autostartMsg struct {
+	enabled bool
+	err     error
+}
 
 // Commands
 func cmdListDevices() tea.Msg {
@@ -97,7 +109,8 @@ func cmdListDevices() tea.Msg {
 }
 
 func cmdCheckStatus() tea.Msg {
-	return statusCheckedMsg{state: checkRunState()}
+	status, err := daemonStatus(true)
+	return statusCheckedMsg{status: status, err: err}
 }
 
 func cmdStart(micDevice, outputDevice string) tea.Cmd {
@@ -121,6 +134,30 @@ func cmdAnimTick() tea.Cmd {
 	return tea.Tick(50*time.Millisecond, func(t time.Time) tea.Msg {
 		return animTickMsg{}
 	})
+}
+
+func cmdDaemon(command string, args ...string) tea.Cmd {
+	return func() tea.Msg {
+		resp, err := sendControlAutoStart(command, args...)
+		if err != nil {
+			return daemonCommandMsg{err: err}
+		}
+		if !resp.OK {
+			return daemonCommandMsg{status: resp.Status, err: fmt.Errorf("%s", resp.Error)}
+		}
+		return daemonCommandMsg{status: resp.Status, message: resp.Message}
+	}
+}
+
+func cmdAutostartStatus() tea.Msg {
+	return autostartMsg{enabled: autostartEnabled()}
+}
+
+func cmdSetAutostart(enabled bool) tea.Cmd {
+	return func() tea.Msg {
+		err := setAutostartEnabled(enabled)
+		return autostartMsg{enabled: enabled, err: err}
+	}
 }
 
 func rainbowText(text string, offset int, gradient []string) string {
@@ -220,7 +257,6 @@ func initialModel() model {
 		spinner:   s,
 		vis:       vis,
 		mon:       NewAudioMonitor(),
-		rec:       &Recorder{},
 		outputDir: cfg.OutputDir,
 		schemeIdx: schemeIdx,
 		cfg:       cfg,
@@ -233,6 +269,7 @@ func (m model) Init() tea.Cmd {
 		cmdCheckStatus,
 		cmdScheduleRefresh(),
 		cmdAnimTick(),
+		cmdAutostartStatus,
 	)
 }
 
@@ -253,6 +290,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.editingDir = false
 				m.cfg.OutputDir = m.outputDir
 				saveConfig(m.cfg)
+				return m, cmdDaemon("set-output-dir", m.outputDir)
 			case "escape":
 				m.editingDir = false
 			case "backspace":
@@ -269,9 +307,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		switch msg.String() {
 		case "q", "ctrl+c":
-			if m.recState == recOn || m.recState == recPrompt {
-				m.rec.Discard()
-			}
 			m.mon.Stop()
 			return m, tea.Quit
 		case "v":
@@ -291,7 +326,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			if m.runState.Running {
 				m.state = stateStopping
-				return m, tea.Batch(m.spinner.Tick, cmdStop)
+				return m, tea.Batch(m.spinner.Tick, cmdDaemon("stop"))
 			}
 			if len(m.sources) == 0 || len(m.sinks) == 0 || m.devicesErr != nil {
 				return m, nil
@@ -302,7 +337,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cfg.PreferredSource = mic
 			m.cfg.PreferredSink = out
 			saveConfig(m.cfg)
-			return m, tea.Batch(m.spinner.Tick, cmdStart(mic, out))
+			return m, tea.Batch(m.spinner.Tick, cmdDaemon("start", mic, out))
 		case "tab":
 			if m.state == stateIdle && !m.runState.Running {
 				m.focusPanel = (m.focusPanel + 1) % 2
@@ -328,38 +363,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			if m.recState == recOn {
-				m.rec.Stop()
-				m.recState = recPrompt
-				return m, nil
+				return m, cmdDaemon("record-stop")
 			}
 			if m.runState.Running {
-				if err := m.rec.Start(); err != nil {
-					m.err = err
-					return m, nil
-				}
-				m.recState = recOn
-				m.recStart = time.Now()
-				return m, nil
+				return m, cmdDaemon("record-start")
 			}
 			return m, tea.Batch(cmdListDevices, cmdCheckStatus)
 		case "R":
 			return m, tea.Batch(cmdListDevices, cmdCheckStatus)
 		case "s":
 			if m.recState == recPrompt {
-				_, err := m.rec.Save(m.outputDir)
-				if err != nil {
-					m.err = err
-				} else {
-					m.err = nil
-				}
-				m.recState = recOff
-				return m, nil
+				return m, cmdDaemon("record-save")
 			}
 		case "d":
 			if m.recState == recPrompt {
-				m.rec.Discard()
-				m.recState = recOff
-				return m, nil
+				return m, cmdDaemon("record-discard")
 			}
 		case "o":
 			if m.runState.Running && m.recState != recPrompt && !m.editingDir {
@@ -367,6 +385,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.dirInput = m.outputDir
 				return m, nil
 			}
+		case "a":
+			return m, cmdSetAutostart(!m.autostart)
 		case "escape":
 			if m.editingDir {
 				m.editingDir = false
@@ -375,11 +395,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 	case sampleMsg:
-		m.bands = m.vis.Analyze(msg.samples)
-		if m.recState == recOn {
-			m.rec.WriteSamples(msg.samples)
+		if len(msg.samples) > 0 {
+			m.bands = m.vis.Analyze(msg.samples)
 		}
-		return m, cmdReadSamples(m.mon)
+		if m.mon.IsRunning() {
+			return m, cmdReadSamples(m.mon)
+		}
+		return m, nil
 
 	case devicesListedMsg:
 		m.devicesErr = msg.err
@@ -403,35 +425,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case statusCheckedMsg:
-		m.runState = msg.state
-		return m, nil
+		if msg.err != nil {
+			m.err = msg.err
+		} else {
+			m.err = nil
+		}
+		cmd := m.applyDaemonStatus(msg.status)
+		return m, cmd
 
-	case startedMsg:
+	case daemonCommandMsg:
 		m.state = stateIdle
 		if msg.err != nil {
 			m.err = msg.err
 		} else {
 			m.err = nil
-			m.runState = RunState{
-				Running:  true,
-				SinkMod:  msg.result.SinkMod,
-				RemapMod: msg.result.RemapMod,
-				MicMod:   msg.result.MicMod,
-				SysMod:   msg.result.SysMod,
-			}
-			m.mon.Start(sinkName + ".monitor")
-			return m, tea.Batch(cmdReadSamples(m.mon))
 		}
-		return m, nil
+		cmd := m.applyDaemonStatus(msg.status)
+		return m, cmd
 
-	case stoppedMsg:
-		m.state = stateIdle
-		m.err = msg.err
-		m.runState = RunState{}
-		m.mon.Stop()
-		if m.recState == recOn {
-			m.rec.Stop()
-			m.recState = recPrompt
+	case autostartMsg:
+		if msg.err != nil {
+			m.err = msg.err
+		} else {
+			m.err = nil
+			m.autostart = msg.enabled
 		}
 		return m, nil
 
@@ -452,6 +469,35 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m *model) applyDaemonStatus(status DaemonStatus) tea.Cmd {
+	m.runState = status.RunState
+	m.recState = recStateFromName(status.RecState)
+	m.recElapsed = time.Duration(status.RecElapsedSecs) * time.Second
+	if status.OutputDir != "" && !m.editingDir {
+		m.outputDir = status.OutputDir
+		m.cfg.OutputDir = status.OutputDir
+	}
+	if status.Error != "" {
+		m.err = fmt.Errorf("%s", status.Error)
+	}
+
+	if m.runState.Running {
+		if !m.mon.IsRunning() {
+			if err := m.mon.Start(sinkName + ".monitor"); err != nil {
+				m.err = err
+				return nil
+			}
+			return cmdReadSamples(m.mon)
+		}
+		return nil
+	}
+
+	if m.mon.IsRunning() {
+		m.mon.Stop()
+	}
+	return nil
 }
 
 // findDevice returns the index of the first matching device name from candidates.
@@ -513,7 +559,7 @@ func (m model) View() tea.View {
 		if m.runState.Running {
 			statusContent.WriteString(runningStyle.Render("  ** Omanote is LIVE **"))
 			if m.recState == recOn {
-				elapsed := time.Since(m.recStart)
+				elapsed := m.recElapsed
 				mins := int(elapsed.Minutes())
 				secs := int(elapsed.Seconds()) % 60
 				statusContent.WriteString("  " + recStyle.Render(fmt.Sprintf("● REC %02d:%02d", mins, secs)))
@@ -547,6 +593,13 @@ func (m model) View() tea.View {
 	b.WriteString(statusBox.Width(contentWidth - 2).Render(statusContent.String()))
 	b.WriteString("\n")
 
+	if m.autostart {
+		b.WriteString(labelStyle.Render("  login ") + valueStyle.Render("enabled"))
+	} else {
+		b.WriteString(labelStyle.Render("  login ") + dimValueStyle.Render("disabled"))
+	}
+	b.WriteString("\n")
+
 	// --- Recording info (below status box) ---
 	if m.recState != recOff {
 		if m.editingDir {
@@ -557,7 +610,7 @@ func (m model) View() tea.View {
 		b.WriteString("\n")
 	}
 	if m.recState == recPrompt {
-		elapsed := time.Since(m.recStart)
+		elapsed := m.recElapsed
 		mins := int(elapsed.Minutes())
 		secs := int(elapsed.Seconds()) % 60
 		b.WriteString(recStyle.Render(fmt.Sprintf("  Recording stopped (%02d:%02d)", mins, secs)))
@@ -666,13 +719,18 @@ func (m model) View() tea.View {
 			help.WriteString(keyStyle.Render("enter") + keyDescStyle.Render(" start"))
 			help.WriteString("  " + keyStyle.Render("r") + keyDescStyle.Render(" refresh"))
 		}
-		help.WriteString("  " + keyStyle.Render("v") + keyDescStyle.Render(" " + m.vis.ModeName()))
-		help.WriteString("  " + keyStyle.Render("c") + keyDescStyle.Render(" " + colorSchemes[m.schemeIdx].Name))
+		help.WriteString("  " + keyStyle.Render("v") + keyDescStyle.Render(" "+m.vis.ModeName()))
+		help.WriteString("  " + keyStyle.Render("c") + keyDescStyle.Render(" "+colorSchemes[m.schemeIdx].Name))
+		if m.autostart {
+			help.WriteString("  " + keyStyle.Render("a") + keyDescStyle.Render(" login off"))
+		} else {
+			help.WriteString("  " + keyStyle.Render("a") + keyDescStyle.Render(" login on"))
+		}
 		if !m.runState.Running {
 			help.WriteString("  " + keyStyle.Render("tab") + keyDescStyle.Render(" switch"))
 			help.WriteString("  " + keyStyle.Render("\u2191\u2193") + keyDescStyle.Render(" select"))
 		}
-		help.WriteString("  " + keyStyle.Render("q") + keyDescStyle.Render(" quit"))
+		help.WriteString("  " + keyStyle.Render("q") + keyDescStyle.Render(" close"))
 	}
 	b.WriteString(help.String())
 	b.WriteString("\n")
@@ -694,4 +752,3 @@ func (m model) View() tea.View {
 	view.AltScreen = true
 	return view
 }
-
