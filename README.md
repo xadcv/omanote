@@ -1,41 +1,41 @@
 # omanote
 
-A terminal UI for creating virtual audio loopback devices on Linux. Combines your microphone and system audio into a single virtual mic input — useful for streaming, screen recording, or any application that needs to capture both sources at once.
+Omanote creates a virtual microphone on Linux that mixes your physical microphone with system audio. It is useful for meeting tools, screen recordings, streaming, OBS, and any app that needs one input containing both voice and desktop sound.
 
-Features a full-screen animated audio visualizer with real FFT-based spectrum analysis.
+It includes a terminal UI, a background daemon, WAV recording, and a Waybar-ready menu interface.
 
-```
+```text
   ___  _ __ ___   __ _ _ __   ___ | |_ ___
  / _ \| '_ ' _ \ / _' | '_ \ / _ \| __/ _ \
 | (_) | | | | | | (_| | | | | (_) | ||  __/
  \___/|_| |_| |_|\__,_|_| |_|\___/ \__\___|
 ```
 
-## How it works
+## Features
 
-omanote creates a PulseAudio null sink (`OmanoteMix`) and a remap source (`Omanote`) that appears as a selectable microphone input. Two `module-loopback` streams route audio into the mix:
-
-1. **Mic loopback** — your selected microphone
-2. **System loopback** — your selected output device's monitor (desktop audio)
-
-Any application (Notion AI Meetings, Zoom, OBS, etc.) can then select `Omanote` as its input to receive both streams mixed together.
-
-While running, a `parec` subprocess captures audio from the mix for real-time FFT visualization in the TUI.
+- Virtual microphone named `Omanote`
+- Mixes selected microphone input with selected system output monitor
+- Background daemon for Waybar/menu control
+- Floating Bubble Tea TUI with real-time FFT visualizer
+- WAV recording with save/discard flow
+- Persistent config for output directory, devices, visualizer mode, and color scheme
+- Optional start-on-login through a user systemd service
 
 ## Requirements
 
-- Linux with **PipeWire** (and PulseAudio compatibility layer)
-- `pactl` — PulseAudio control CLI
-- `parec` — PulseAudio recording tool (for visualizer audio capture)
-- Go 1.25+ (to build from source)
+- Linux with PipeWire and the PulseAudio compatibility layer
+- `pactl` for PulseAudio module control
+- `parec` for visualization and recording capture
+- Go 1.25.5 or newer to build from source
+- Optional: Waybar, Walker, Hyprland/Omarchy for desktop menu integration
 
-On Arch Linux:
+Arch Linux:
 
 ```sh
 sudo pacman -S pipewire pipewire-pulse
 ```
 
-On Ubuntu/Debian:
+Ubuntu/Debian:
 
 ```sh
 sudo apt install pipewire pipewire-pulse pulseaudio-utils
@@ -47,7 +47,7 @@ sudo apt install pipewire pipewire-pulse pulseaudio-utils
 go install github.com/xadcv/omanote@latest
 ```
 
-Or build from source:
+From source:
 
 ```sh
 git clone https://github.com/xadcv/omanote.git
@@ -55,75 +55,177 @@ cd omanote
 go build -o omanote
 ```
 
-## Usage
+## Quick Start
+
+Open the TUI:
 
 ```sh
 omanote
 ```
 
-`omanote` opens the TUI. The same binary also exposes a background controller for menu-bar integrations:
+Start the virtual mic without opening the TUI:
 
 ```sh
+omanote start
+```
+
+Record and save a WAV file:
+
+```sh
+omanote record start
+omanote record stop
+omanote record save
+```
+
+Stop the virtual mic:
+
+```sh
+omanote stop
+```
+
+Quit the daemon and clean up Omanote audio modules:
+
+```sh
+omanote quit
+```
+
+## TUI Controls
+
+| Key | Action |
+| --- | --- |
+| `Enter` / `Space` | Start or stop the virtual mic |
+| `r` | Start/stop recording while live; refresh devices while stopped |
+| `s` | Save a stopped recording |
+| `d` | Discard a stopped recording |
+| `o` | Edit recording output directory |
+| `a` | Toggle daemon start on login |
+| `v` | Cycle visualizer mode |
+| `c` | Cycle color scheme |
+| `Tab` | Switch device panel while stopped |
+| `Up` / `Down` / `j` / `k` | Select device while stopped |
+| `q` / `Ctrl+C` | Close the TUI |
+
+The `a` toggle controls future logins. It does not stop the daemon that is already running in the current session.
+
+## CLI
+
+```sh
+omanote [tui]
 omanote daemon
+omanote status [--follow] [--waybar]
 omanote start
 omanote stop
 omanote record start
 omanote record stop
 omanote record save
 omanote record discard
-omanote status --follow --waybar
 omanote menu
 omanote autostart enable
+omanote autostart disable
+omanote autostart status
+omanote quit
 ```
 
-On Omarchy, the Waybar item uses `omanote status --follow --waybar`; left-click opens/focuses the floating TUI and right-click opens the Omanote action menu.
-The TUI's start-on-login toggle controls whether the daemon starts on future logins; it does not stop the current session.
+`omanote status --follow --waybar` prints newline-delimited Waybar JSON. `omanote menu` opens a Walker menu with state-aware actions for opening the TUI, starting/stopping the virtual mic, starting/stopping/saving/discarding recordings, and quitting.
 
-### Controls
+## Waybar Integration
 
-| Key | Action |
-|---|---|
-| `Enter` / `Space` | Start or stop the virtual mic |
-| `a` | Toggle Omanote daemon start on login |
-| `v` | Cycle visualizer mode |
-| `Tab` | Switch between Microphone and System Audio panels |
-| `Up` / `Down` / `j` / `k` | Select device |
-| `r` | Start/stop recording while live; refresh devices while stopped |
-| `s` / `d` | Save or discard a stopped recording |
-| `q` / `Ctrl+C` | Close the TUI |
+Example Waybar module:
 
-### Visualizer Modes
+```jsonc
+"custom/omanote": {
+  "exec": "omanote status --follow --waybar",
+  "return-type": "json",
+  "format": "{icon}",
+  "format-icons": {
+    "inactive": "󰍭",
+    "idle": "󰍭",
+    "live": "󰍬",
+    "recording": "󰑋",
+    "pending": "󰆓",
+    "error": "󰅚"
+  },
+  "tooltip": true,
+  "on-click": "omarchy-launch-or-focus-tui omanote",
+  "on-click-right": "omanote menu"
+}
+```
 
-Cycle through with `v`:
+Example Hyprland keybinding to open the menu directly:
 
-| Mode | Description |
-|---|---|
-| **Bars** | Smooth fractional Unicode block spectrum |
-| **Bricks** | Solid half-height blocks with gaps |
-| **Columns** | Thin interpolated columns between bands |
-| **Wave** | Braille oscilloscope waveform |
-| **Scatter** | Braille particle field with gravity |
-| **Flame** | Rising fire tendrils per frequency band |
-| **Retro** | Synthwave sun + audio-reactive wave + perspective grid |
-| **Pulse** | Pulsating braille ellipse with shockwave ring |
+```conf
+bindd = SUPER SHIFT, R, Omanote Menu, exec, omanote menu
+```
 
-Audio is analyzed via windowed FFT (2048 samples, Hann window) into 10 frequency bands with temporal smoothing for fluid animation at 20 FPS.
+For a floating TUI window on Hyprland:
+
+```conf
+windowrule = float on, match:class org.omarchy.omanote
+windowrule = size 800 500, match:class org.omarchy.omanote
+windowrule = center on, match:class org.omarchy.omanote
+```
+
+## How It Works
+
+Omanote creates four PulseAudio modules:
+
+1. `module-null-sink` named `OmanoteMix`
+2. `module-remap-source` named `Omanote`, backed by `OmanoteMix.monitor`
+3. `module-loopback` from the selected microphone into `OmanoteMix`
+4. `module-loopback` from the selected system output monitor into `OmanoteMix`
+
+Applications can then select `Omanote` as their microphone input.
+
+The daemon owns the audio module lifecycle and recording state. The TUI, CLI, and Waybar menu all talk to the daemon through a Unix socket at `$XDG_RUNTIME_DIR/omanote/daemon.sock`.
+
+## Configuration And State
+
+Config file:
+
+```text
+$XDG_CONFIG_HOME/omanote/config.toml
+```
+
+Defaults to:
+
+```text
+~/.config/omanote/config.toml
+```
+
+State files:
+
+```text
+$XDG_CACHE_HOME/omanote/modules
+$XDG_CACHE_HOME/omanote/daemon.log
+```
+
+Defaults to:
+
+```text
+~/.cache/omanote/
+```
+
+Recordings default to:
+
+```text
+~/Recordings/
+```
 
 ## Architecture
 
+```text
+main.go        entrypoint and CLI dispatch
+cli.go         CLI commands, Waybar JSON, Walker menu
+daemon.go      background controller and recording owner
+ipc.go         Unix socket client/server messages
+autostart.go   user systemd service management
+model.go       Bubble Tea TUI state and key handling
+audio.go       PulseAudio device detection and module lifecycle
+monitor.go     parec audio capture
+recorder.go    WAV writer
+visualizer.go  FFT analysis and render modes
+config.go      TOML config persistence
 ```
-main.go        — entry point, launches the Bubble Tea program
-model.go       — TUI state machine, full-screen layout, key handling
-audio.go       — PulseAudio device detection and virtual mic lifecycle
-visualizer.go  — FFT analysis engine and 8 render modes
-monitor.go     — parec subprocess for real-time audio capture
-```
-
-The app follows the [Bubble Tea](https://github.com/charmbracelet/bubbletea) architecture: commands produce messages, the `Update` function transitions state, and `View` renders the current state. Audio operations run asynchronously so the UI never blocks.
-
-State is cached in `~/.cache/omanote/` (respects `XDG_CACHE_HOME`):
-
-- `modules` — PulseAudio module IDs for the 4 loaded modules (null-sink, remap-source, 2x loopback)
 
 ## License
 
