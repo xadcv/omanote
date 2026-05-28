@@ -43,6 +43,27 @@ sudo apt install pipewire pipewire-pulse pulseaudio-utils
 
 ## Install
 
+Installer script (recommended):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/xadcv/omanote/main/install.sh | bash
+```
+
+The installer:
+
+- Runs `go install github.com/xadcv/omanote@latest`
+- Detects `mise` and adds `$HOME/go/bin` to your shell PATH rc file
+- Detects Hyprland + Omarchy and **asks before** adding:
+  `bindd = SUPER SHIFT, R, Omanote Menu, exec, omanote menu`
+
+You can also run the installer from a clone:
+
+```sh
+./install.sh
+```
+
+Direct Go install:
+
 ```sh
 go install github.com/xadcv/omanote@latest
 ```
