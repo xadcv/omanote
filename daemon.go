@@ -226,19 +226,13 @@ func (d *daemonServer) startVirtualMic(micDevice, outputDevice string) error {
 }
 
 func (d *daemonServer) resolvePreferredDevicesLocked() (string, string, error) {
-	sources, srcErr := listSources()
-	sinks, sinkErr := listSinks()
+	sources, srcErr := listSelectableSources()
+	sinks, sinkErr := listSelectableSinks()
 	if srcErr != nil {
 		return "", "", srcErr
 	}
 	if sinkErr != nil {
 		return "", "", sinkErr
-	}
-	if len(sources) == 0 {
-		return "", "", fmt.Errorf("no microphone sources found")
-	}
-	if len(sinks) == 0 {
-		return "", "", fmt.Errorf("no output sinks found")
 	}
 	sourceIdx := findDevice(sources, d.cfg.PreferredSource, getDefaultSource())
 	sinkIdx := findDevice(sinks, d.cfg.PreferredSink, getDefaultSink())

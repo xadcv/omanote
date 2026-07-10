@@ -14,7 +14,7 @@ It includes a terminal UI, a background daemon, WAV recording, and a Waybar-read
 ## Features
 
 - Virtual microphone named `Omanote`
-- Mixes selected microphone input with selected system output monitor
+- Mixes selected microphone input with selected system output monitor, with `None` available for either side
 - Background daemon for Waybar/menu control
 - Floating Bubble Tea TUI with real-time FFT visualizer
 - WAV recording with save/discard flow
@@ -192,8 +192,10 @@ Omanote creates four PulseAudio modules:
 
 1. `module-null-sink` named `OmanoteMix`
 2. `module-remap-source` named `Omanote`, backed by `OmanoteMix.monitor`
-3. `module-loopback` from the selected microphone into `OmanoteMix`
-4. `module-loopback` from the selected system output monitor into `OmanoteMix`
+3. Optional `module-loopback` from the selected microphone into `OmanoteMix`
+4. Optional `module-loopback` from the selected system output monitor into `OmanoteMix`
+
+Select `None` for Microphone or System Audio in the TUI to skip that loopback. Selecting `None` for both creates a silent virtual `Omanote` microphone.
 
 Applications can then select `Omanote` as their microphone input.
 

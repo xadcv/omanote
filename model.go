@@ -91,8 +91,8 @@ type autostartMsg struct {
 
 // Commands
 func cmdListDevices() tea.Msg {
-	sources, srcErr := listSources()
-	sinks, sinkErr := listSinks()
+	sources, srcErr := listSelectableSources()
+	sinks, sinkErr := listSelectableSinks()
 	var err error
 	if srcErr != nil {
 		err = srcErr

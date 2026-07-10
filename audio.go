@@ -10,8 +10,9 @@ import (
 )
 
 const (
-	sinkName   = "OmanoteMix"
-	sourceName = "Omanote"
+	sinkName     = "OmanoteMix"
+	sourceName   = "Omanote"
+	noDeviceName = "none"
 )
 
 func cacheDir() string {
@@ -30,6 +31,37 @@ func modulesFile() string { return filepath.Join(cacheDir(), "modules") }
 type AudioDevice struct {
 	Name        string
 	Description string
+}
+
+func noneDevice() AudioDevice {
+	return AudioDevice{Name: noDeviceName, Description: "None"}
+}
+
+func isNoDevice(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), noDeviceName)
+}
+
+func selectableDevices(devices []AudioDevice) []AudioDevice {
+	withNone := make([]AudioDevice, 0, len(devices)+1)
+	withNone = append(withNone, noneDevice())
+	withNone = append(withNone, devices...)
+	return withNone
+}
+
+func listSelectableSources() ([]AudioDevice, error) {
+	devices, err := listSources()
+	if err != nil {
+		return nil, err
+	}
+	return selectableDevices(devices), nil
+}
+
+func listSelectableSinks() ([]AudioDevice, error) {
+	devices, err := listSinks()
+	if err != nil {
+		return nil, err
+	}
+	return selectableDevices(devices), nil
 }
 
 type pactlDevice struct {
@@ -149,8 +181,9 @@ func checkRunState() RunState {
 	if err != nil {
 		return RunState{}
 	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 4 {
+
+	state, ok := parseRunState(data)
+	if !ok {
 		os.Remove(modulesFile())
 		return RunState{}
 	}
@@ -161,20 +194,14 @@ func checkRunState() RunState {
 		return RunState{}
 	}
 	modStr := string(modList)
-	for _, id := range lines {
-		if !strings.Contains(modStr, id+"\t") {
+	for _, id := range state.moduleIDs() {
+		if !moduleLoaded(modStr, id) {
 			os.Remove(modulesFile())
 			return RunState{}
 		}
 	}
 
-	return RunState{
-		Running:  true,
-		SinkMod:  lines[0],
-		RemapMod: lines[1],
-		MicMod:   lines[2],
-		SysMod:   lines[3],
-	}
+	return state
 }
 
 type StartResult struct {
@@ -182,6 +209,110 @@ type StartResult struct {
 	RemapMod string
 	MicMod   string
 	SysMod   string
+}
+
+func (s RunState) moduleIDs() []string {
+	ids := make([]string, 0, 4)
+	for _, id := range []string{s.SinkMod, s.RemapMod, s.MicMod, s.SysMod} {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func moduleLoaded(modulesShort, id string) bool {
+	for _, line := range strings.Split(modulesShort, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == id {
+			return true
+		}
+	}
+	return false
+}
+
+func parseRunState(data []byte) (RunState, bool) {
+	text := strings.TrimSpace(string(data))
+	if text == "" {
+		return RunState{}, false
+	}
+
+	lines := strings.Split(text, "\n")
+	keyed := false
+	for _, line := range lines {
+		if strings.Contains(line, "=") {
+			keyed = true
+			break
+		}
+	}
+
+	var state RunState
+	if keyed {
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			key, value, ok := strings.Cut(line, "=")
+			if !ok {
+				return RunState{}, false
+			}
+			value = strings.TrimSpace(value)
+			if value == "" {
+				continue
+			}
+			switch strings.TrimSpace(key) {
+			case "sink":
+				state.SinkMod = value
+			case "remap":
+				state.RemapMod = value
+			case "mic":
+				state.MicMod = value
+			case "sys":
+				state.SysMod = value
+			default:
+				return RunState{}, false
+			}
+		}
+	} else {
+		ids := make([]string, 0, len(lines))
+		for _, line := range lines {
+			id := strings.TrimSpace(line)
+			if id != "" {
+				ids = append(ids, id)
+			}
+		}
+		if len(ids) != 4 {
+			return RunState{}, false
+		}
+		state = RunState{
+			SinkMod:  ids[0],
+			RemapMod: ids[1],
+			MicMod:   ids[2],
+			SysMod:   ids[3],
+		}
+	}
+
+	if state.SinkMod == "" || state.RemapMod == "" {
+		return RunState{}, false
+	}
+	state.Running = true
+	return state, true
+}
+
+func writeRunState(state RunState) error {
+	lines := []string{
+		"sink=" + state.SinkMod,
+		"remap=" + state.RemapMod,
+	}
+	if state.MicMod != "" {
+		lines = append(lines, "mic="+state.MicMod)
+	}
+	if state.SysMod != "" {
+		lines = append(lines, "sys="+state.SysMod)
+	}
+	return os.WriteFile(modulesFile(), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }
 
 func loadModule(args ...string) (string, error) {
@@ -194,6 +325,19 @@ func loadModule(args ...string) (string, error) {
 
 func startVirtualMic(micDevice, outputDevice string) (StartResult, error) {
 	os.Remove(modulesFile())
+	if micDevice == "" {
+		micDevice = noDeviceName
+	}
+	if outputDevice == "" {
+		outputDevice = noDeviceName
+	}
+
+	var loaded []string
+	cleanup := func() {
+		for i := len(loaded) - 1; i >= 0; i-- {
+			exec.Command("pactl", "unload-module", loaded[i]).Run()
+		}
+	}
 
 	// 1. Create null sink (mixing point)
 	sinkMod, err := loadModule("module-null-sink",
@@ -204,6 +348,7 @@ func startVirtualMic(micDevice, outputDevice string) (StartResult, error) {
 	if err != nil {
 		return StartResult{}, fmt.Errorf("failed to create null sink: %w", err)
 	}
+	loaded = append(loaded, sinkMod)
 
 	// 2. Create remap-source so "Omanote" appears as a selectable mic input
 	remapMod, err := loadModule("module-remap-source",
@@ -212,38 +357,53 @@ func startVirtualMic(micDevice, outputDevice string) (StartResult, error) {
 		"source_properties=device.description="+sourceName,
 	)
 	if err != nil {
-		exec.Command("pactl", "unload-module", sinkMod).Run()
+		cleanup()
 		return StartResult{}, fmt.Errorf("failed to create remap source: %w", err)
 	}
+	loaded = append(loaded, remapMod)
 
 	// 3. Loopback: selected mic → virtual sink
-	micMod, err := loadModule("module-loopback",
-		"source="+micDevice,
-		"sink="+sinkName,
-		"latency_msec=20",
-	)
-	if err != nil {
-		exec.Command("pactl", "unload-module", remapMod).Run()
-		exec.Command("pactl", "unload-module", sinkMod).Run()
-		return StartResult{}, fmt.Errorf("mic loopback failed: %w", err)
+	micMod := ""
+	if !isNoDevice(micDevice) {
+		micMod, err = loadModule("module-loopback",
+			"source="+micDevice,
+			"sink="+sinkName,
+			"latency_msec=20",
+		)
+		if err != nil {
+			cleanup()
+			return StartResult{}, fmt.Errorf("mic loopback failed: %w", err)
+		}
+		loaded = append(loaded, micMod)
 	}
 
 	// 4. Loopback: selected output's monitor → virtual sink
-	sysMod, err := loadModule("module-loopback",
-		"source="+outputDevice+".monitor",
-		"sink="+sinkName,
-		"latency_msec=20",
-	)
-	if err != nil {
-		exec.Command("pactl", "unload-module", micMod).Run()
-		exec.Command("pactl", "unload-module", remapMod).Run()
-		exec.Command("pactl", "unload-module", sinkMod).Run()
-		return StartResult{}, fmt.Errorf("system loopback failed: %w", err)
+	sysMod := ""
+	if !isNoDevice(outputDevice) {
+		sysMod, err = loadModule("module-loopback",
+			"source="+outputDevice+".monitor",
+			"sink="+sinkName,
+			"latency_msec=20",
+		)
+		if err != nil {
+			cleanup()
+			return StartResult{}, fmt.Errorf("system loopback failed: %w", err)
+		}
+		loaded = append(loaded, sysMod)
 	}
 
 	// Persist all module IDs
-	data := fmt.Sprintf("%s\n%s\n%s\n%s\n", sinkMod, remapMod, micMod, sysMod)
-	os.WriteFile(modulesFile(), []byte(data), 0o644)
+	state := RunState{
+		Running:  true,
+		SinkMod:  sinkMod,
+		RemapMod: remapMod,
+		MicMod:   micMod,
+		SysMod:   sysMod,
+	}
+	if err := writeRunState(state); err != nil {
+		cleanup()
+		return StartResult{}, fmt.Errorf("persist modules: %w", err)
+	}
 
 	return StartResult{
 		SinkMod:  sinkMod,
@@ -258,10 +418,15 @@ func stopVirtualMic() error {
 	if err != nil {
 		return nil
 	}
-	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	state, ok := parseRunState(data)
+	if !ok {
+		os.Remove(modulesFile())
+		return nil
+	}
+	ids := state.moduleIDs()
 	// Unload in reverse order (sys-loopback, mic-loopback, remap, sink)
-	for i := len(lines) - 1; i >= 0; i-- {
-		exec.Command("pactl", "unload-module", strings.TrimSpace(lines[i])).Run()
+	for i := len(ids) - 1; i >= 0; i-- {
+		exec.Command("pactl", "unload-module", ids[i]).Run()
 	}
 	os.Remove(modulesFile())
 	return nil
