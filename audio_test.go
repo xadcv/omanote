@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestSelectableDevicesIncludeNoneFirst(t *testing.T) {
 	devices := selectableDevices([]AudioDevice{
@@ -27,11 +30,11 @@ func TestFindDeviceCanRestoreNoneSelection(t *testing.T) {
 }
 
 func TestParseRunStateKeyedOptionalLoopbacks(t *testing.T) {
-	state, ok := parseRunState([]byte("sink=10\nremap=11\nsys=12\n"))
+	state, ok := parseRunState([]byte("sink=10\nremap=11\nsys=12\ndefault_sink=alsa_output.usb\n"))
 	if !ok {
 		t.Fatal("parseRunState() rejected keyed state")
 	}
-	if !state.Running || state.SinkMod != "10" || state.RemapMod != "11" || state.MicMod != "" || state.SysMod != "12" {
+	if !state.Running || state.SinkMod != "10" || state.RemapMod != "11" || state.MicMod != "" || state.SysMod != "12" || state.SavedDefaultSink != "alsa_output.usb" {
 		t.Fatalf("parseRunState() = %#v", state)
 	}
 
@@ -64,5 +67,48 @@ func TestModuleLoadedMatchesModuleIDField(t *testing.T) {
 	}
 	if moduleLoaded(modules, "2") {
 		t.Fatal("moduleLoaded() matched a partial module ID")
+	}
+}
+
+func TestOmanoteModuleIDsFromShortFindsCurrentAndLegacyModules(t *testing.T) {
+	modules := strings.Join([]string{
+		"1\tlibpipewire-module-rt\t{}",
+		"20\tmodule-null-sink\tsink_name=OmanoteMix sink_properties=device.description=OmanoteMix",
+		"21\tmodule-remap-source\tsource_name=Omanote master=OmanoteMix.monitor",
+		"22\tmodule-loopback\tsource=OmanoteMix.monitor sink=bluez_output.test latency_msec=40",
+		"23\tmodule-loopback\tsource=bluez_output.test.monitor sink=OmanoteMix latency_msec=20",
+		"24\tmodule-loopback\tsource=alsa_input.test sink=SomeOtherSink latency_msec=20",
+	}, "\n")
+
+	got := omanoteModuleIDsFromShort(modules)
+	want := []string{"20", "21", "22", "23"}
+	if len(got) != len(want) {
+		t.Fatalf("omanoteModuleIDsFromShort() = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("omanoteModuleIDsFromShort() = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestSinkInputOwnerModuleParsesStringNumberAndNull(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{name: "string", raw: `"536870919"`, want: "536870919"},
+		{name: "number", raw: `42`, want: "42"},
+		{name: "null", raw: `null`, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sinkInputOwnerModule(pactlSinkInput{OwnerModule: []byte(tt.raw)})
+			if got != tt.want {
+				t.Fatalf("sinkInputOwnerModule() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

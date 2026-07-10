@@ -14,7 +14,7 @@ It includes a terminal UI, a background daemon, WAV recording, and a Waybar-read
 ## Features
 
 - Virtual microphone named `Omanote`
-- Mixes selected microphone input with selected system output monitor, with `None` available for either side
+- Mixes selected microphone input with app playback routed through the selected system output, with `None` available for either side
 - Background daemon for Waybar/menu control
 - Floating Bubble Tea TUI with real-time FFT visualizer
 - WAV recording with save/discard flow
@@ -188,14 +188,17 @@ windowrule = center on, match:class org.omarchy.omanote
 
 ## How It Works
 
-Omanote creates four PulseAudio modules:
+Omanote creates a software mix and routes app playback through it:
 
 1. `module-null-sink` named `OmanoteMix`
 2. `module-remap-source` named `Omanote`, backed by `OmanoteMix.monitor`
 3. Optional `module-loopback` from the selected microphone into `OmanoteMix`
-4. Optional `module-loopback` from the selected system output monitor into `OmanoteMix`
+4. For system audio, Omanote saves the current default sink, sets `OmanoteMix` as the default sink, and moves existing playback streams into it
+5. Optional `module-loopback` from `OmanoteMix.monitor` to the selected system output so audio remains audible
 
-Select `None` for Microphone or System Audio in the TUI to skip that loopback. Selecting `None` for both creates a silent virtual `Omanote` microphone.
+Select `None` for Microphone to skip the mic loopback. Select `None` for System Output to skip playback routing. Selecting `None` for both creates a silent virtual `Omanote` microphone.
+
+When Omanote stops, it restores the saved default sink, moves playback streams back, and unloads its modules.
 
 Applications can then select `Omanote` as their microphone input.
 

@@ -564,7 +564,7 @@ func (m model) View() tea.View {
 				secs := int(elapsed.Seconds()) % 60
 				statusContent.WriteString("  " + recStyle.Render(fmt.Sprintf("● REC %02d:%02d", mins, secs)))
 			}
-			// Show device descriptions for mic and system audio
+			// Show device descriptions for mic and system output
 			micDesc := ""
 			if m.selectedSource < len(m.sources) {
 				micDesc = deviceLabel(m.sources[m.selectedSource])
@@ -663,12 +663,12 @@ func (m model) View() tea.View {
 		leftB.WriteString("\n")
 	}
 
-	// Right panel: System Audio
+	// Right panel: System Output
 	var rightB strings.Builder
 	if m.focusPanel == 1 && canSelect {
-		rightB.WriteString(subtitleStyle.Render("System Audio"))
+		rightB.WriteString(subtitleStyle.Render("System Output"))
 	} else {
-		rightB.WriteString(dimSubtitleStyle.Render("System Audio"))
+		rightB.WriteString(dimSubtitleStyle.Render("System Output"))
 	}
 	rightB.WriteString("\n")
 	for i, s := range m.sinks {

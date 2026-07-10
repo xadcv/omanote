@@ -212,11 +212,12 @@ func (d *daemonServer) startVirtualMic(micDevice, outputDevice string) error {
 		return err
 	}
 	d.runState = RunState{
-		Running:  true,
-		SinkMod:  result.SinkMod,
-		RemapMod: result.RemapMod,
-		MicMod:   result.MicMod,
-		SysMod:   result.SysMod,
+		Running:          true,
+		SinkMod:          result.SinkMod,
+		RemapMod:         result.RemapMod,
+		MicMod:           result.MicMod,
+		SysMod:           result.SysMod,
+		SavedDefaultSink: result.SavedDefaultSink,
 	}
 	d.cfg.PreferredSource = micDevice
 	d.cfg.PreferredSink = outputDevice

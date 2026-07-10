@@ -6,13 +6,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
 const (
-	sinkName     = "OmanoteMix"
-	sourceName   = "Omanote"
-	noDeviceName = "none"
+	sinkName                = "OmanoteMix"
+	sourceName              = "Omanote"
+	noDeviceName            = "none"
+	systemLoopbackLatencyMS = "40"
 )
 
 func cacheDir() string {
@@ -65,8 +67,15 @@ func listSelectableSinks() ([]AudioDevice, error) {
 }
 
 type pactlDevice struct {
+	Index       int    `json:"index"`
 	Name        string `json:"name"`
 	Description string `json:"description"`
+}
+
+type pactlSinkInput struct {
+	Index       int             `json:"index"`
+	OwnerModule json.RawMessage `json:"owner_module"`
+	Sink        int             `json:"sink"`
 }
 
 // cleanDescription returns a usable description, falling back to
@@ -167,13 +176,136 @@ func getDefaultSink() string {
 	return strings.TrimSpace(string(out))
 }
 
-// RunState tracks the 4 PA modules: null-sink, remap-source, mic-loopback, sys-loopback.
+func runPactl(args ...string) error {
+	out, err := exec.Command("pactl", args...).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg != "" {
+			return fmt.Errorf("%w: %s", err, msg)
+		}
+		return err
+	}
+	return nil
+}
+
+func setDefaultSink(sink string) error {
+	if sink == "" {
+		return fmt.Errorf("missing sink")
+	}
+	return runPactl("set-default-sink", sink)
+}
+
+func listSinkInputs() ([]pactlSinkInput, error) {
+	out, err := exec.Command("pactl", "-f", "json", "list", "sink-inputs").Output()
+	if err != nil {
+		return nil, fmt.Errorf("cannot list sink inputs: %w", err)
+	}
+	var inputs []pactlSinkInput
+	if err := json.Unmarshal(out, &inputs); err != nil {
+		return nil, fmt.Errorf("cannot parse sink inputs: %w", err)
+	}
+	return inputs, nil
+}
+
+func sinkIndexByName(name string) (int, error) {
+	out, err := exec.Command("pactl", "-f", "json", "list", "sinks").Output()
+	if err != nil {
+		return 0, fmt.Errorf("cannot list sinks: %w", err)
+	}
+	var sinks []pactlDevice
+	if err := json.Unmarshal(out, &sinks); err != nil {
+		return 0, fmt.Errorf("cannot parse sinks: %w", err)
+	}
+	for _, sink := range sinks {
+		if sink.Name == name {
+			return sink.Index, nil
+		}
+	}
+	return 0, fmt.Errorf("sink %q not found", name)
+}
+
+func sinkInputOwnerModule(input pactlSinkInput) string {
+	if len(input.OwnerModule) == 0 || string(input.OwnerModule) == "null" {
+		return ""
+	}
+	var text string
+	if err := json.Unmarshal(input.OwnerModule, &text); err == nil {
+		return text
+	}
+	var numeric int
+	if err := json.Unmarshal(input.OwnerModule, &numeric); err == nil {
+		return strconv.Itoa(numeric)
+	}
+	return strings.Trim(string(input.OwnerModule), `"`)
+}
+
+func moveSinkInputs(fromSink, targetSink string, skipModules ...string) error {
+	targetIndex, err := sinkIndexByName(targetSink)
+	if err != nil {
+		return err
+	}
+
+	fromIndex := -1
+	if fromSink != "" {
+		fromIndex, err = sinkIndexByName(fromSink)
+		if err != nil {
+			return err
+		}
+	}
+
+	skip := make(map[string]bool, len(skipModules))
+	for _, id := range skipModules {
+		id = strings.TrimSpace(id)
+		if id != "" {
+			skip[id] = true
+		}
+	}
+
+	inputs, err := listSinkInputs()
+	if err != nil {
+		return err
+	}
+
+	var firstErr error
+	for _, input := range inputs {
+		if skip[sinkInputOwnerModule(input)] {
+			continue
+		}
+		if fromIndex >= 0 && input.Sink != fromIndex {
+			continue
+		}
+		if input.Sink == targetIndex {
+			continue
+		}
+		if err := runPactl("move-sink-input", strconv.Itoa(input.Index), targetSink); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("move sink input %d to %s: %w", input.Index, targetSink, err)
+		}
+	}
+	return firstErr
+}
+
+func restoreSystemAudioRoute(defaultSink string, skipModules ...string) error {
+	if defaultSink == "" {
+		return nil
+	}
+	var firstErr error
+	if err := setDefaultSink(defaultSink); err != nil {
+		firstErr = fmt.Errorf("restore default sink %s: %w", defaultSink, err)
+	}
+	if err := moveSinkInputs(sinkName, defaultSink, skipModules...); err != nil && firstErr == nil {
+		firstErr = err
+	}
+	return firstErr
+}
+
+// RunState tracks PA modules plus any default sink Omanote temporarily replaced.
 type RunState struct {
-	Running  bool
-	SinkMod  string
-	RemapMod string
-	MicMod   string
-	SysMod   string
+	Running          bool
+	SinkMod          string
+	RemapMod         string
+	MicMod           string
+	SysMod           string
+	SavedDefaultSink string
 }
 
 func checkRunState() RunState {
@@ -204,11 +336,49 @@ func checkRunState() RunState {
 	return state
 }
 
+func omanoteModuleIDs() ([]string, error) {
+	out, err := exec.Command("pactl", "list", "modules", "short").Output()
+	if err != nil {
+		return nil, fmt.Errorf("cannot list modules: %w", err)
+	}
+	return omanoteModuleIDsFromShort(string(out)), nil
+}
+
+func omanoteModuleIDsFromShort(modulesShort string) []string {
+	var ids []string
+	for _, line := range strings.Split(modulesShort, "\n") {
+		parts := strings.SplitN(line, "\t", 3)
+		if len(parts) < 3 {
+			continue
+		}
+		id, args := strings.TrimSpace(parts[0]), parts[2]
+		if id == "" {
+			continue
+		}
+		if strings.Contains(args, sinkName) || strings.Contains(args, "source_name="+sourceName) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+func unloadOmanoteModules() error {
+	ids, err := omanoteModuleIDs()
+	if err != nil {
+		return err
+	}
+	for i := len(ids) - 1; i >= 0; i-- {
+		exec.Command("pactl", "unload-module", ids[i]).Run()
+	}
+	return nil
+}
+
 type StartResult struct {
-	SinkMod  string
-	RemapMod string
-	MicMod   string
-	SysMod   string
+	SinkMod          string
+	RemapMod         string
+	MicMod           string
+	SysMod           string
+	SavedDefaultSink string
 }
 
 func (s RunState) moduleIDs() []string {
@@ -271,6 +441,8 @@ func parseRunState(data []byte) (RunState, bool) {
 				state.MicMod = value
 			case "sys":
 				state.SysMod = value
+			case "default_sink":
+				state.SavedDefaultSink = value
 			default:
 				return RunState{}, false
 			}
@@ -312,6 +484,9 @@ func writeRunState(state RunState) error {
 	if state.SysMod != "" {
 		lines = append(lines, "sys="+state.SysMod)
 	}
+	if state.SavedDefaultSink != "" {
+		lines = append(lines, "default_sink="+state.SavedDefaultSink)
+	}
 	return os.WriteFile(modulesFile(), []byte(strings.Join(lines, "\n")+"\n"), 0o644)
 }
 
@@ -324,12 +499,23 @@ func loadModule(args ...string) (string, error) {
 }
 
 func startVirtualMic(micDevice, outputDevice string) (StartResult, error) {
+	if err := unloadOmanoteModules(); err != nil {
+		return StartResult{}, err
+	}
 	os.Remove(modulesFile())
 	if micDevice == "" {
 		micDevice = noDeviceName
 	}
 	if outputDevice == "" {
 		outputDevice = noDeviceName
+	}
+
+	savedDefaultSink := ""
+	if !isNoDevice(outputDevice) {
+		savedDefaultSink = getDefaultSink()
+		if savedDefaultSink == "" {
+			return StartResult{}, fmt.Errorf("cannot determine default sink")
+		}
 	}
 
 	var loaded []string
@@ -377,57 +563,75 @@ func startVirtualMic(micDevice, outputDevice string) (StartResult, error) {
 		loaded = append(loaded, micMod)
 	}
 
-	// 4. Loopback: selected output's monitor → virtual sink
+	// 4. Route app playback through OmanoteMix, then play it to the selected output.
 	sysMod := ""
 	if !isNoDevice(outputDevice) {
 		sysMod, err = loadModule("module-loopback",
-			"source="+outputDevice+".monitor",
-			"sink="+sinkName,
-			"latency_msec=20",
+			"source="+sinkName+".monitor",
+			"sink="+outputDevice,
+			"latency_msec="+systemLoopbackLatencyMS,
 		)
 		if err != nil {
 			cleanup()
-			return StartResult{}, fmt.Errorf("system loopback failed: %w", err)
+			return StartResult{}, fmt.Errorf("system output loopback failed: %w", err)
 		}
 		loaded = append(loaded, sysMod)
+
+		if err := setDefaultSink(sinkName); err != nil {
+			cleanup()
+			return StartResult{}, fmt.Errorf("set default sink to %s: %w", sinkName, err)
+		}
+		if err := moveSinkInputs("", sinkName, micMod, sysMod); err != nil {
+			restoreSystemAudioRoute(savedDefaultSink, micMod, sysMod)
+			cleanup()
+			return StartResult{}, fmt.Errorf("move playback streams to %s: %w", sinkName, err)
+		}
 	}
 
 	// Persist all module IDs
 	state := RunState{
-		Running:  true,
-		SinkMod:  sinkMod,
-		RemapMod: remapMod,
-		MicMod:   micMod,
-		SysMod:   sysMod,
+		Running:          true,
+		SinkMod:          sinkMod,
+		RemapMod:         remapMod,
+		MicMod:           micMod,
+		SysMod:           sysMod,
+		SavedDefaultSink: savedDefaultSink,
 	}
 	if err := writeRunState(state); err != nil {
+		restoreSystemAudioRoute(savedDefaultSink, micMod, sysMod)
 		cleanup()
 		return StartResult{}, fmt.Errorf("persist modules: %w", err)
 	}
 
 	return StartResult{
-		SinkMod:  sinkMod,
-		RemapMod: remapMod,
-		MicMod:   micMod,
-		SysMod:   sysMod,
+		SinkMod:          sinkMod,
+		RemapMod:         remapMod,
+		MicMod:           micMod,
+		SysMod:           sysMod,
+		SavedDefaultSink: savedDefaultSink,
 	}, nil
 }
 
 func stopVirtualMic() error {
 	data, err := os.ReadFile(modulesFile())
 	if err != nil {
-		return nil
+		return unloadOmanoteModules()
 	}
 	state, ok := parseRunState(data)
 	if !ok {
 		os.Remove(modulesFile())
-		return nil
+		return unloadOmanoteModules()
 	}
+	restoreErr := restoreSystemAudioRoute(state.SavedDefaultSink, state.MicMod, state.SysMod)
 	ids := state.moduleIDs()
 	// Unload in reverse order (sys-loopback, mic-loopback, remap, sink)
 	for i := len(ids) - 1; i >= 0; i-- {
 		exec.Command("pactl", "unload-module", ids[i]).Run()
 	}
+	cleanupErr := unloadOmanoteModules()
 	os.Remove(modulesFile())
-	return nil
+	if restoreErr != nil {
+		return restoreErr
+	}
+	return cleanupErr
 }
