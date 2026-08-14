@@ -35,6 +35,9 @@ type DaemonStatus struct {
 	LastSaved        string   `json:"last_saved,omitempty"`
 	Error            string   `json:"error,omitempty"`
 	MonitorAvailable bool     `json:"monitor_available"`
+	PreferredSource  string   `json:"preferred_source,omitempty"`
+	PreferredSink    string   `json:"preferred_sink,omitempty"`
+	Autostart        bool     `json:"autostart"`
 }
 
 func runtimeDir() string {
@@ -98,10 +101,13 @@ func daemonStatus(autoStart bool) (DaemonStatus, error) {
 		if autoStart {
 			return DaemonStatus{}, err
 		}
+		cfg := loadConfig()
 		return DaemonStatus{
-			DaemonRunning: false,
-			RecState:      recStateName(recOff),
-			OutputDir:     loadConfig().OutputDir,
+			DaemonRunning:   false,
+			RecState:        recStateName(recOff),
+			OutputDir:       cfg.OutputDir,
+			PreferredSource: cfg.PreferredSource,
+			PreferredSink:   cfg.PreferredSink,
 		}, nil
 	}
 	if !resp.OK {

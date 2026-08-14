@@ -10,6 +10,8 @@ import (
 	"time"
 )
 
+const quattroPluginID = "xadcv.omanote"
+
 func runCLI(args []string) error {
 	if len(args) == 0 || args[0] == "tui" {
 		return runTUI()
@@ -21,9 +23,11 @@ func runCLI(args []string) error {
 	case "status":
 		return runStatus(args[1:])
 	case "start":
-		return runControlCommand("start")
+		return runControlCommand("start", args[1:]...)
 	case "stop":
 		return runControlCommand("stop")
+	case "devices":
+		return runDevices(args[1:])
 	case "record":
 		return runRecordCommand(args[1:])
 	case "quit":
@@ -122,25 +126,36 @@ func runAutostartCommand(args []string) error {
 func runStatus(args []string) error {
 	follow := false
 	waybar := false
+	jsonOut := false
 	for _, arg := range args {
 		switch arg {
 		case "--follow":
 			follow = true
 		case "--waybar":
 			waybar = true
+		case "--json":
+			jsonOut = true
 		default:
 			return fmt.Errorf("unknown status flag %q", arg)
 		}
+	}
+	if waybar && jsonOut {
+		return fmt.Errorf("status flags --waybar and --json are mutually exclusive")
 	}
 
 	printStatus := func() {
 		status, err := daemonStatus(false)
 		if err != nil {
-			status = DaemonStatus{RecState: recStateName(recOff), OutputDir: loadConfig().OutputDir, Error: err.Error()}
+			cfg := loadConfig()
+			status = DaemonStatus{RecState: recStateName(recOff), OutputDir: cfg.OutputDir, PreferredSource: cfg.PreferredSource, PreferredSink: cfg.PreferredSink, Error: err.Error()}
 		}
-		if waybar {
+		status = enrichStatus(status)
+		switch {
+		case jsonOut:
+			fmt.Println(formatJSONStatus(status))
+		case waybar:
 			fmt.Println(formatWaybarStatus(status))
-		} else {
+		default:
 			fmt.Println(formatHumanStatus(status))
 		}
 	}
@@ -176,40 +191,163 @@ func formatHumanStatus(status DaemonStatus) string {
 	return "Omanote daemon: running\nstate: " + state
 }
 
-func formatWaybarStatus(status DaemonStatus) string {
+func enrichStatus(status DaemonStatus) DaemonStatus {
+	cfg := loadConfig()
+	if status.OutputDir == "" {
+		status.OutputDir = cfg.OutputDir
+	}
+	if status.PreferredSource == "" {
+		status.PreferredSource = cfg.PreferredSource
+	}
+	if status.PreferredSink == "" {
+		status.PreferredSink = cfg.PreferredSink
+	}
+	if status.RecState == "" {
+		status.RecState = recStateName(recOff)
+	}
+	status.Autostart = autostartEnabled()
+	return status
+}
+
+func statusAlt(status DaemonStatus) string {
 	alt := "inactive"
-	tooltip := "Omanote daemon stopped"
 	if status.DaemonRunning {
 		alt = "idle"
-		tooltip = "Omanote ready"
 		if status.RunState.Running {
 			alt = "live"
-			tooltip = "Omanote virtual mic live"
 		}
 		if status.RecState == "recording" {
 			alt = "recording"
-			tooltip = fmt.Sprintf("Omanote recording %s", formatDuration(status.RecElapsedSecs))
 		} else if status.RecState == "pending" {
 			alt = "pending"
-			tooltip = "Omanote recording stopped; save or discard"
 		}
 	}
 	if status.Error != "" {
 		alt = "error"
-		tooltip = status.Error
 	}
+	return alt
+}
 
+func statusTooltip(status DaemonStatus) string {
+	if status.Error != "" {
+		return status.Error
+	}
+	if !status.DaemonRunning {
+		return "Omanote daemon stopped"
+	}
+	if status.RecState == "recording" {
+		return fmt.Sprintf("Omanote recording %s", formatDuration(status.RecElapsedSecs))
+	}
+	if status.RecState == "pending" {
+		return "Omanote recording stopped; save or discard"
+	}
+	if status.RunState.Running {
+		return "Omanote virtual mic live"
+	}
+	return "Omanote ready"
+}
+
+func formatWaybarStatus(status DaemonStatus) string {
+	alt := statusAlt(status)
 	payload := map[string]any{
 		"text":    "",
 		"alt":     alt,
 		"class":   alt,
-		"tooltip": tooltip,
+		"tooltip": statusTooltip(status),
 	}
 	data, _ := json.Marshal(payload)
 	return string(data)
 }
 
+func formatJSONStatus(status DaemonStatus) string {
+	status = enrichStatus(status)
+	payload := struct {
+		DaemonStatus
+		State string `json:"state"`
+	}{
+		DaemonStatus: status,
+		State:        statusAlt(status),
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return `{"error":"encode failed"}`
+	}
+	return string(data)
+}
+
+type deviceList struct {
+	Sources []AudioDevice `json:"sources"`
+	Sinks   []AudioDevice `json:"sinks"`
+}
+
+func formatDevicesJSON(sources, sinks []AudioDevice) string {
+	if sources == nil {
+		sources = []AudioDevice{}
+	}
+	if sinks == nil {
+		sinks = []AudioDevice{}
+	}
+	data, err := json.Marshal(deviceList{Sources: sources, Sinks: sinks})
+	if err != nil {
+		return `{"sources":[],"sinks":[]}`
+	}
+	return string(data)
+}
+
+func runDevices(args []string) error {
+	jsonOut := false
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOut = true
+		default:
+			return fmt.Errorf("unknown devices flag %q", arg)
+		}
+	}
+
+	sources, srcErr := listSelectableSources()
+	sinks, sinkErr := listSelectableSinks()
+	if srcErr != nil {
+		return srcErr
+	}
+	if sinkErr != nil {
+		return sinkErr
+	}
+
+	if jsonOut {
+		fmt.Println(formatDevicesJSON(sources, sinks))
+		return nil
+	}
+
+	fmt.Println("Microphone:")
+	for _, device := range sources {
+		fmt.Printf("  %s\t%s\n", device.Name, device.Description)
+	}
+	fmt.Println("System output:")
+	for _, device := range sinks {
+		fmt.Printf("  %s\t%s\n", device.Name, device.Description)
+	}
+	return nil
+}
+
+func commandExists(name string) bool {
+	_, err := exec.LookPath(name)
+	return err == nil
+}
+
+func summonQuattroPanel() error {
+	cmd := exec.Command("omarchy-shell", "shell", "summon", quattroPluginID, "{}")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("summon %s: %w", quattroPluginID, err)
+	}
+	return nil
+}
+
 func runMenu() error {
+	if commandExists("omarchy-shell") {
+		return summonQuattroPanel()
+	}
+
 	status, _ := daemonStatus(false)
 	options := menuOptions(status)
 	choice, err := selectMenuOption("Omanote", options)
@@ -281,8 +419,10 @@ func selectMenuOption(prompt string, options []string) (string, error) {
 }
 
 func launchTUI() error {
-	cmd := exec.Command("omarchy-launch-or-focus-tui", "omanote")
-	return cmd.Start()
+	if commandExists("omarchy-launch-or-focus-tui") {
+		return exec.Command("omarchy-launch-or-focus-tui", "omanote").Start()
+	}
+	return exec.Command("omanote").Start()
 }
 
 func notifyControl(command string) error {
@@ -321,16 +461,17 @@ func formatDuration(totalSeconds int) string {
 }
 
 func printUsage() {
-	fmt.Fprintln(os.Stderr, `Usage: omanote [tui|daemon|status|start|stop|record|menu|autostart|quit]
+	fmt.Fprintln(os.Stderr, `Usage: omanote [tui|daemon|status|start|stop|devices|record|menu|autostart|quit]
 
 Commands:
   tui                         Open the floating TUI
   daemon                      Run the background controller
-  status [--follow] [--waybar] Print daemon status
-  start                       Start the virtual mic
+  status [--follow] [--json|--waybar]
+  start [mic] [sink]          Start the virtual mic
   stop                        Stop the virtual mic
+  devices [--json]            List selectable microphones and outputs
   record start|stop|save|discard
-  menu                        Open the Waybar action menu
+  menu                        Open the Quattro panel, or Walker if unavailable
   autostart enable|disable|status
   quit                        Stop the daemon`)
 }

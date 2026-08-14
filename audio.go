@@ -31,8 +31,8 @@ func cacheDir() string {
 func modulesFile() string { return filepath.Join(cacheDir(), "modules") }
 
 type AudioDevice struct {
-	Name        string
-	Description string
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
 func noneDevice() AudioDevice {
@@ -300,12 +300,12 @@ func restoreSystemAudioRoute(defaultSink string, skipModules ...string) error {
 
 // RunState tracks PA modules plus any default sink Omanote temporarily replaced.
 type RunState struct {
-	Running          bool
-	SinkMod          string
-	RemapMod         string
-	MicMod           string
-	SysMod           string
-	SavedDefaultSink string
+	Running          bool   `json:"running"`
+	SinkMod          string `json:"sink_mod,omitempty"`
+	RemapMod         string `json:"remap_mod,omitempty"`
+	MicMod           string `json:"mic_mod,omitempty"`
+	SysMod           string `json:"sys_mod,omitempty"`
+	SavedDefaultSink string `json:"saved_default_sink,omitempty"`
 }
 
 func checkRunState() RunState {

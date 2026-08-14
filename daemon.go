@@ -177,6 +177,8 @@ func (d *daemonServer) statusLocked() DaemonStatus {
 		LastSaved:        d.lastSaved,
 		Error:            errText,
 		MonitorAvailable: d.mon.IsRunning(),
+		PreferredSource:  d.cfg.PreferredSource,
+		PreferredSink:    d.cfg.PreferredSink,
 	}
 }
 

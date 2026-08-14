@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "xadcv.omanote",
+  "name": "Omanote",
+  "version": "1.0.0",
+  "author": "xadcv",
+  "license": "MIT",
+  "description": "Virtual mic that mixes your microphone with system audio.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Omanote",
+    "description": "Mix microphone and system audio into a virtual mic, with recording controls.",
+    "category": "Audio",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

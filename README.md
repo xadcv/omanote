@@ -2,7 +2,7 @@
 
 Omanote creates a virtual microphone on Linux that mixes your physical microphone with system audio. It is useful for meeting tools, screen recordings, streaming, OBS, and any app that needs one input containing both voice and desktop sound.
 
-It includes a terminal UI, a background daemon, WAV recording, and a Waybar-ready menu interface.
+It includes a terminal UI, a background daemon, WAV recording, and an Omarchy Quattro / Quickshell bar plugin.
 
 ```text
   ___  _ __ ___   __ _ _ __   ___ | |_ ___
@@ -15,7 +15,7 @@ It includes a terminal UI, a background daemon, WAV recording, and a Waybar-read
 
 - Virtual microphone named `Omanote`
 - Mixes selected microphone input with app playback routed through the selected system output, with `None` available for either side
-- Background daemon for Waybar/menu control
+- Background daemon for CLI, TUI, and Quattro bar control
 - Floating Bubble Tea TUI with real-time FFT visualizer
 - WAV recording with save/discard flow
 - Persistent config for output directory, devices, visualizer mode, and color scheme
@@ -27,7 +27,7 @@ It includes a terminal UI, a background daemon, WAV recording, and a Waybar-read
 - `pactl` for PulseAudio module control
 - `parec` for visualization and recording capture
 - Go 1.25.5 or newer to build from source
-- Optional: Waybar, Walker, Hyprland/Omarchy for desktop menu integration
+- Optional: Omarchy Quattro (`omarchy-shell`) for the native bar widget and panel
 
 Arch Linux:
 
@@ -53,8 +53,17 @@ The installer:
 
 - Runs `go install github.com/xadcv/omanote@latest`
 - Detects `mise` and adds `$HOME/go/bin` to your shell PATH rc file
-- Detects Hyprland + Omarchy and **asks before** adding:
-  `bindd = SUPER SHIFT, R, Omanote Menu, exec, omanote menu`
+- Detects Omarchy Quattro and **asks before** running:
+  `omarchy plugin add https://github.com/xadcv/omanote.git --enable`
+- Detects Hyprland + Quattro and **asks before** adding:
+  `bindd = SUPER SHIFT, R, Omanote, exec, omanote menu`
+
+Quattro install (binary + shell plugin):
+
+```sh
+go install github.com/xadcv/omanote@latest
+omarchy plugin add https://github.com/xadcv/omanote.git --enable
+```
 
 You can also run the installer from a clone:
 
@@ -133,9 +142,10 @@ The `a` toggle controls future logins. It does not stop the daemon that is alrea
 ```sh
 omanote [tui]
 omanote daemon
-omanote status [--follow] [--waybar]
-omanote start
+omanote status [--follow] [--json|--waybar]
+omanote start [mic] [sink]
 omanote stop
+omanote devices [--json]
 omanote record start
 omanote record stop
 omanote record save
@@ -147,36 +157,32 @@ omanote autostart status
 omanote quit
 ```
 
-`omanote status --follow --waybar` prints newline-delimited Waybar JSON. `omanote menu` opens a Walker menu with state-aware actions for opening the TUI, starting/stopping the virtual mic, starting/stopping/saving/discarding recordings, and quitting.
+`omanote status --json` is the payload the Quattro plugin polls. `omanote menu` summons the Quattro panel when `omarchy-shell` is available, and falls back to Walker otherwise.
 
-## Waybar Integration
+## Quattro Plugin
 
-Example Waybar module:
+Omanote is a third-party Omarchy shell plugin (`xadcv.omanote`). After the binary is on `PATH`:
 
-```jsonc
-"custom/omanote": {
-  "exec": "omanote status --follow --waybar",
-  "return-type": "json",
-  "format": "{icon}",
-  "format-icons": {
-    "inactive": "󰍭",
-    "idle": "󰍭",
-    "live": "󰍬",
-    "recording": "󰑋",
-    "pending": "󰆓",
-    "error": "󰅚"
-  },
-  "tooltip": true,
-  "on-click": "omarchy-launch-or-focus-tui omanote",
-  "on-click-right": "omanote menu"
-}
+```sh
+omarchy plugin add https://github.com/xadcv/omanote.git --enable
+omarchy bar move xadcv.omanote --section right
 ```
 
-Example Hyprland keybinding to open the menu directly:
+The bar icon shows idle, live, recording, pending-save, and error states. Left click opens the details panel. Right click starts or stops the virtual mic. The panel can start/stop the mix, record, pick microphone and system output (including `None`), toggle start on login, open the TUI, and quit the daemon.
+
+Summon the panel from a keybind or script:
+
+```sh
+omarchy-shell shell summon xadcv.omanote '{}'
+# or
+omanote menu
+```
 
 ```conf
-bindd = SUPER SHIFT, R, Omanote Menu, exec, omanote menu
+bindd = SUPER SHIFT, R, Omanote, exec, omanote menu
 ```
+
+Remove it with `omarchy plugin remove xadcv.omanote`.
 
 For a floating TUI window on Hyprland:
 
@@ -202,7 +208,7 @@ When Omanote stops, it restores the saved default sink, moves playback streams b
 
 Applications can then select `Omanote` as their microphone input.
 
-The daemon owns the audio module lifecycle and recording state. The TUI, CLI, and Waybar menu all talk to the daemon through a Unix socket at `$XDG_RUNTIME_DIR/omanote/daemon.sock`.
+The daemon owns the audio module lifecycle and recording state. The TUI, CLI, and Quattro plugin all talk to the daemon through a Unix socket at `$XDG_RUNTIME_DIR/omanote/daemon.sock`.
 
 ## Configuration And State
 
@@ -240,8 +246,13 @@ Recordings default to:
 ## Architecture
 
 ```text
+manifest.json  Quattro plugin contract
+BarWidget.qml  Omarchy bar entry point
+Panel.qml      details popup for mix, record, and devices
+Service.qml    Process wrapper around the omanote CLI
+Model.js       status parsing and bar icon mapping
 main.go        entrypoint and CLI dispatch
-cli.go         CLI commands, Waybar JSON, Walker menu
+cli.go         CLI commands, JSON status, Quattro/Walker menu
 daemon.go      background controller and recording owner
 ipc.go         Unix socket client/server messages
 autostart.go   user systemd service management
