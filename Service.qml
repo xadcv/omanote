@@ -32,7 +32,11 @@ Item {
             return
         }
         refreshStatus()
-        refreshDevices()
+    }
+
+    function refreshAll() {
+        refresh()
+        if (installed) refreshDevices()
     }
 
     function refreshStatus() {
@@ -117,10 +121,19 @@ Item {
     }
 
     Timer {
+        id: devicesTimer
+        interval: 5000
+        repeat: true
+        running: true
+        triggeredOnStart: true
+        onTriggered: if (root.installed) root.refreshDevices()
+    }
+
+    Timer {
         id: delayedRefresh
         interval: 400
         repeat: false
-        onTriggered: root.refresh()
+        onTriggered: root.refreshAll()
     }
 
     Timer {

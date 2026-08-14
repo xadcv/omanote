@@ -33,13 +33,13 @@ Panel {
     function open() {
         openedFromHotkey = false
         setCenterHoverRevealSuppressed(false)
-        service.refresh()
+        service.refreshAll()
         root.controller.show()
     }
 
     function openFromHotkey() {
         openedFromHotkey = true
-        service.refresh()
+        service.refreshAll()
         root.controller.show()
         Qt.callLater(function() {
             if (root.opened) setCenterHoverRevealSuppressed(true)
@@ -68,7 +68,7 @@ Panel {
     }
 
     function refresh() {
-        service.refresh()
+        service.refreshAll()
     }
 
     function syncSelectionFromStatus() {
@@ -206,7 +206,7 @@ Panel {
         focusSection = "actions"
         selectedIndex = 0
         if (panelFlick) panelFlick.contentY = 0
-        service.refresh()
+        service.refreshAll()
         Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
     }
 
