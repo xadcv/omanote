@@ -2,6 +2,7 @@
 set -euo pipefail
 
 REPO="github.com/xadcv/omanote"
+PLUGIN_URL="https://github.com/xadcv/omanote.git"
 BIN_NAME="omanote"
 
 log() { printf '%s\n' "$*"; }
@@ -39,15 +40,39 @@ add_to_path_for_mise() {
     fi
 }
 
-setup_hyprland_binding() {
-    has_cmd hyprctl || return 0
-    has_cmd omarchy-launch-walker || return 0
+setup_omarchy_plugin() {
+    has_cmd omarchy || return 0
+    has_cmd omarchy-shell || return 0
 
-    local bind_line='bindd = SUPER SHIFT, R, Omanote Menu, exec, omanote menu'
+    printf '\nDetected Omarchy Quattro.\n'
+    read -r -p "Add Omanote as a Quattro shell plugin? [y/N] " ans
+    case "${ans,,}" in
+        y|yes)
+            if omarchy plugin add "$PLUGIN_URL" --enable --yes; then
+                log "Enabled Quattro plugin xadcv.omanote."
+                log "Summon it with: omarchy-shell shell summon xadcv.omanote '{}'"
+                log "Or run: omanote menu"
+            else
+                warn "Could not add the Quattro plugin. Add it later with:"
+                warn "  omarchy plugin add $PLUGIN_URL --enable"
+            fi
+            ;;
+        *)
+            log "Skipped Quattro plugin setup."
+            log "Add it later with: omarchy plugin add $PLUGIN_URL --enable"
+            ;;
+    esac
+}
+
+setup_omarchy_binding() {
+    has_cmd hyprctl || return 0
+    has_cmd omarchy-shell || return 0
+
+    local bind_line='bindd = SUPER SHIFT, R, Omanote, exec, omanote menu'
     local hypr_conf="$HOME/.config/hypr/hyprland.conf"
 
-    printf '\nDetected Hyprland + Omarchy integration.\n'
-    read -r -p "Add SUPER+SHIFT+R Omanote menu keybind to $hypr_conf? [y/N] " ans
+    printf '\nDetected Hyprland + Omarchy Quattro.\n'
+    read -r -p "Add SUPER+SHIFT+R Omanote panel keybind to $hypr_conf? [y/N] " ans
     case "${ans,,}" in
         y|yes)
             if append_line_if_missing "$bind_line" "$hypr_conf"; then
@@ -73,7 +98,8 @@ main() {
     log "Installed $BIN_NAME to \\$(go env GOPATH)/bin"
 
     add_to_path_for_mise
-    setup_hyprland_binding
+    setup_omarchy_plugin
+    setup_omarchy_binding
 
     log "Done. Run '$BIN_NAME' to open the TUI."
 }
