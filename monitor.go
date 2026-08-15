@@ -20,12 +20,14 @@ import (
 // a PipeWire/PulseAudio device and makes the latest chunk available for
 // visualization.
 type AudioMonitor struct {
-	cmd     *exec.Cmd
-	stdout  io.ReadCloser
-	mu      sync.Mutex
-	samples []float64
-	sampleC chan []float64
-	running bool
+	cmd        *exec.Cmd
+	stdout     io.ReadCloser
+	done       chan struct{}
+	mu         sync.Mutex
+	samples    []float64
+	sampleC    chan []float64
+	running    bool
+	generation uint64
 }
 
 // NewAudioMonitor creates an idle AudioMonitor.
@@ -37,11 +39,18 @@ func NewAudioMonitor() *AudioMonitor {
 // deviceName is used as-is (e.g. "OmanoteMix.monitor").
 func (m *AudioMonitor) Start(deviceName string) error {
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.running {
-		m.mu.Unlock()
 		return fmt.Errorf("audio monitor already running")
 	}
-	m.mu.Unlock()
+drainSamples:
+	for {
+		select {
+		case <-m.sampleC:
+		default:
+			break drainSamples
+		}
+	}
 
 	cmd := exec.Command("parec",
 		"--device="+deviceName,
@@ -57,32 +66,50 @@ func (m *AudioMonitor) Start(deviceName string) error {
 	}
 
 	if err := cmd.Start(); err != nil {
+		stdout.Close()
 		return fmt.Errorf("parec start: %w", err)
 	}
 
-	m.mu.Lock()
+	m.generation++
+	generation := m.generation
+	done := make(chan struct{})
 	m.cmd = cmd
 	m.stdout = stdout
+	m.done = done
 	m.running = true
-	m.mu.Unlock()
+	m.samples = nil
 
-	go m.readLoop()
+	go m.readLoop(cmd, stdout, generation, done)
 
 	return nil
 }
 
 // readLoop continuously reads 2048 float32 samples (8192 bytes) from parec
 // stdout and stores them as float64 under the mutex.
-func (m *AudioMonitor) readLoop() {
+func (m *AudioMonitor) readLoop(cmd *exec.Cmd, stdout io.ReadCloser, generation uint64, done chan struct{}) {
 	const (
 		chunkSamples = 2048
 		chunkBytes   = chunkSamples * 4 // float32 = 4 bytes
 	)
 
+	defer func() {
+		cmd.Wait()
+		m.mu.Lock()
+		if m.generation == generation && m.cmd == cmd {
+			m.cmd = nil
+			m.stdout = nil
+			m.done = nil
+			m.running = false
+			m.samples = nil
+		}
+		m.mu.Unlock()
+		close(done)
+	}()
+
 	buf := make([]byte, chunkBytes)
 
 	for {
-		_, err := io.ReadFull(m.stdout, buf)
+		_, err := io.ReadFull(stdout, buf)
 		if err != nil {
 			// Pipe closed or process exited — stop the loop.
 			return
@@ -95,6 +122,10 @@ func (m *AudioMonitor) readLoop() {
 		}
 
 		m.mu.Lock()
+		if m.generation != generation || !m.running {
+			m.mu.Unlock()
+			return
+		}
 		m.samples = samples
 		sampleC := m.sampleC
 		m.mu.Unlock()
@@ -115,16 +146,23 @@ func (m *AudioMonitor) Stop() {
 	}
 	cmd := m.cmd
 	stdout := m.stdout
+	done := m.done
+	m.generation++
+	m.cmd = nil
+	m.stdout = nil
+	m.done = nil
 	m.running = false
 	m.samples = nil
 	m.mu.Unlock()
 
 	if cmd != nil && cmd.Process != nil {
 		cmd.Process.Kill()
-		cmd.Wait()
 	}
 	if stdout != nil {
 		stdout.Close()
+	}
+	if done != nil {
+		<-done
 	}
 }
 

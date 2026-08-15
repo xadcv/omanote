@@ -61,7 +61,7 @@ Item {
 
     function startMic(mic, sink) {
         var args = ["start"]
-        if (mic) args.push(String(mic))
+        if (mic || sink) args.push(String(mic || ""))
         if (sink) args.push(String(sink))
         runAction(args, "Starting virtual mic…")
     }

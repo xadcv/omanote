@@ -14,6 +14,12 @@ import (
 
 const daemonSocketFile = "daemon.sock"
 
+const (
+	controlDialTimeout    = 750 * time.Millisecond
+	controlDefaultTimeout = 3 * time.Second
+	controlActionTimeout  = 15 * time.Second
+)
+
 type controlRequest struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args,omitempty"`
@@ -40,10 +46,20 @@ type DaemonStatus struct {
 	Autostart        bool     `json:"autostart"`
 }
 
+func controlTimeout(command string) time.Duration {
+	switch command {
+	case "start", "stop", "record-start", "record-save", "quit":
+		return controlActionTimeout
+	default:
+		return controlDefaultTimeout
+	}
+}
+
 func runtimeDir() string {
 	if base := os.Getenv("XDG_RUNTIME_DIR"); base != "" {
 		dir := filepath.Join(base, "omanote")
 		os.MkdirAll(dir, 0o700)
+		os.Chmod(dir, 0o700)
 		return dir
 	}
 	return cacheDir()
@@ -54,11 +70,14 @@ func daemonSocketPath() string {
 }
 
 func sendControl(command string, args ...string) (controlResponse, error) {
-	conn, err := net.DialTimeout("unix", daemonSocketPath(), 750*time.Millisecond)
+	conn, err := net.DialTimeout("unix", daemonSocketPath(), controlDialTimeout)
 	if err != nil {
 		return controlResponse{}, err
 	}
 	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(controlTimeout(command))); err != nil {
+		return controlResponse{}, fmt.Errorf("set daemon connection deadline: %w", err)
+	}
 
 	req := controlRequest{Command: command, Args: args}
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
@@ -120,13 +139,19 @@ func startDaemonProcess() error {
 	if _, err := sendControl("status"); err == nil {
 		return nil
 	}
+	if autostartEnabled() {
+		if err := runSystemctlUser("start", autostartServiceName); err != nil {
+			return fmt.Errorf("start managed daemon: %w", err)
+		}
+		return nil
+	}
 
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("find executable: %w", err)
 	}
 	logPath := filepath.Join(cacheDir(), "daemon.log")
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open daemon log: %w", err)
 	}

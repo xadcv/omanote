@@ -43,14 +43,43 @@ func loadConfig() Config {
 	if err != nil {
 		return cfg
 	}
-	toml.Unmarshal(data, &cfg)
+	if _, err := toml.Decode(string(data), &cfg); err != nil {
+		return cfg
+	}
 	return cfg
 }
 
-func saveConfig(cfg Config) {
-	os.MkdirAll(configDir(), 0o755)
+func saveConfig(cfg Config) error {
+	if err := os.MkdirAll(configDir(), 0o755); err != nil {
+		return err
+	}
 	var buf bytes.Buffer
 	enc := toml.NewEncoder(&buf)
-	enc.Encode(cfg)
-	os.WriteFile(configFile(), buf.Bytes(), 0o644)
+	if err := enc.Encode(cfg); err != nil {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(configDir(), ".config.toml.tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+
+	if err := tmp.Chmod(0o644); err != nil {
+		tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(buf.Bytes()); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, configFile())
 }

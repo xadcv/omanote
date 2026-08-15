@@ -40,6 +40,7 @@ WantedBy=default.target
 }
 
 func systemdQuote(value string) string {
+	value = strings.ReplaceAll(value, "%", "%%")
 	if strings.ContainsAny(value, " \t\"'\\") {
 		return strconv.Quote(value)
 	}

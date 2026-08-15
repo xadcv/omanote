@@ -51,17 +51,25 @@ curl -fsSL https://raw.githubusercontent.com/xadcv/omanote/main/install.sh | bas
 
 The installer:
 
-- Runs `go install github.com/xadcv/omanote@latest`
-- Detects `mise` and adds `$HOME/go/bin` to your shell PATH rc file
+- Installs the binary to `$HOME/.local/bin/omanote` and adds that directory to
+  your shell `PATH` when needed
+- Can enable and start `omanote.service` as a systemd user service
 - Detects Omarchy Quattro and **asks before** running:
   `omarchy plugin add https://github.com/xadcv/omanote.git --enable`
-- Detects Hyprland + Quattro and **asks before** adding:
-  `bindd = SUPER SHIFT, R, Omanote, exec, omanote menu`
+- Detects Hyprland + Quattro and **asks before** adding this to
+  `~/.config/hypr/bindings.lua`:
+  `o.bind("SUPER + SHIFT + R", "Omanote Menu", "omanote menu")`
+
+Pass `--yes` for unattended setup:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/xadcv/omanote/main/install.sh | bash -s -- --yes
+```
 
 Quattro install (binary + shell plugin):
 
 ```sh
-go install github.com/xadcv/omanote@latest
+GOBIN="$HOME/.local/bin" go install github.com/xadcv/omanote@latest
 omarchy plugin add https://github.com/xadcv/omanote.git --enable
 ```
 
@@ -74,7 +82,7 @@ You can also run the installer from a clone:
 Direct Go install:
 
 ```sh
-go install github.com/xadcv/omanote@latest
+GOBIN="$HOME/.local/bin" go install github.com/xadcv/omanote@latest
 ```
 
 From source:
@@ -178,18 +186,20 @@ omarchy-shell shell summon xadcv.omanote '{}'
 omanote menu
 ```
 
-```conf
-bindd = SUPER SHIFT, R, Omanote, exec, omanote menu
+```lua
+o.bind("SUPER + SHIFT + R", "Omanote Menu", "omanote menu")
 ```
 
 Remove it with `omarchy plugin remove xadcv.omanote`.
 
 For a floating TUI window on Hyprland:
 
-```conf
-windowrule = float on, match:class org.omarchy.omanote
-windowrule = size 800 500, match:class org.omarchy.omanote
-windowrule = center on, match:class org.omarchy.omanote
+```lua
+o.window("^org\\.omarchy\\.omanote$", {
+  float = true,
+  size = { 800, 500 },
+  center = true,
+})
 ```
 
 ## How It Works

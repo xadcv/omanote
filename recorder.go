@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -25,9 +26,11 @@ const (
 type Recorder struct {
 	mu        sync.Mutex
 	file      *os.File
+	tempPath  string
 	dataSize  uint32
 	startTime time.Time
 	recording bool
+	writeErr  error
 }
 
 // Start creates a temp file and writes a 44-byte WAV header with placeholder
@@ -36,8 +39,8 @@ func (r *Recorder) Start() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.recording {
-		return fmt.Errorf("recorder already running")
+	if r.recording || r.tempPath != "" {
+		return fmt.Errorf("recorder already has an active or pending recording")
 	}
 
 	f, err := os.CreateTemp(os.TempDir(), "omanote-rec-*.wav")
@@ -52,9 +55,11 @@ func (r *Recorder) Start() error {
 	}
 
 	r.file = f
+	r.tempPath = f.Name()
 	r.dataSize = 0
 	r.startTime = time.Now()
 	r.recording = true
+	r.writeErr = nil
 	return nil
 }
 
@@ -64,11 +69,15 @@ func (r *Recorder) WriteSamples(samples []float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if !r.recording || r.file == nil {
+	if !r.recording || r.file == nil || r.writeErr != nil {
 		return
 	}
 
 	buf := make([]byte, len(samples)*4)
+	if uint64(r.dataSize)+uint64(len(buf)) > uint64(^uint32(0)) {
+		r.writeErr = fmt.Errorf("recording exceeds WAV size limit")
+		return
+	}
 	for i, s := range samples {
 		bits := math.Float32bits(float32(s))
 		binary.LittleEndian.PutUint32(buf[i*4:i*4+4], bits)
@@ -76,6 +85,11 @@ func (r *Recorder) WriteSamples(samples []float64) {
 
 	n, err := r.file.Write(buf)
 	if err != nil {
+		r.writeErr = fmt.Errorf("write recording: %w", err)
+		return
+	}
+	if n != len(buf) {
+		r.writeErr = io.ErrShortWrite
 		return
 	}
 	r.dataSize += uint32(n)
@@ -95,39 +109,53 @@ func (r *Recorder) Save(destDir string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	if r.file == nil {
+	if r.recording {
+		return "", fmt.Errorf("stop the recording before saving")
+	}
+	if r.tempPath == "" {
 		return "", fmt.Errorf("no recording to save")
 	}
-
-	// Seek back to the beginning and rewrite the header with correct sizes.
-	if _, err := r.file.Seek(0, io.SeekStart); err != nil {
-		return "", fmt.Errorf("seek to header: %w", err)
+	if r.writeErr != nil {
+		return "", r.writeErr
 	}
-	if err := writeWAVHeader(r.file, r.dataSize); err != nil {
-		return "", fmt.Errorf("finalize WAV header: %w", err)
-	}
-
-	tmpPath := r.file.Name()
-	if err := r.file.Close(); err != nil {
-		return "", fmt.Errorf("close temp file: %w", err)
-	}
-	r.file = nil
-
 	if err := os.MkdirAll(destDir, 0o755); err != nil {
 		return "", fmt.Errorf("create dest dir: %w", err)
 	}
 
-	ts := r.startTime.Format("2006-01-02-15-04-05")
-	destPath := filepath.Join(destDir, fmt.Sprintf("omanote-%s.wav", ts))
-
-	if err := os.Rename(tmpPath, destPath); err != nil {
-		// Cross-filesystem fallback: copy then delete.
-		if err := copyFile(tmpPath, destPath); err != nil {
-			return "", fmt.Errorf("copy file: %w", err)
+	if r.file != nil {
+		// Seek back to the beginning and rewrite the header with correct sizes.
+		if _, err := r.file.Seek(0, io.SeekStart); err != nil {
+			return "", fmt.Errorf("seek to header: %w", err)
 		}
-		os.Remove(tmpPath)
+		if err := writeWAVHeader(r.file, r.dataSize); err != nil {
+			return "", fmt.Errorf("finalize WAV header: %w", err)
+		}
+		if err := r.file.Sync(); err != nil {
+			return "", fmt.Errorf("sync temp file: %w", err)
+		}
+		if err := r.file.Close(); err != nil {
+			r.file = nil
+			return "", fmt.Errorf("close temp file: %w", err)
+		}
+		r.file = nil
 	}
 
+	var destPath string
+	for sequence := 0; ; sequence++ {
+		destPath = recordingPath(destDir, r.startTime, sequence)
+		err := moveFileNoReplace(r.tempPath, destPath)
+		if os.IsExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", fmt.Errorf("move recording: %w", err)
+		}
+		break
+	}
+
+	r.tempPath = ""
+	r.dataSize = 0
+	r.writeErr = nil
 	return destPath, nil
 }
 
@@ -137,11 +165,15 @@ func (r *Recorder) Discard() {
 	defer r.mu.Unlock()
 
 	if r.file != nil {
-		name := r.file.Name()
 		r.file.Close()
-		os.Remove(name)
 		r.file = nil
 	}
+	if r.tempPath != "" {
+		os.Remove(r.tempPath)
+		r.tempPath = ""
+	}
+	r.dataSize = 0
+	r.writeErr = nil
 	r.recording = false
 }
 
@@ -192,22 +224,64 @@ func writeWAVHeader(f *os.File, dataSize uint32) error {
 	return err
 }
 
-// copyFile copies src to dst by reading and writing the full contents.
-func copyFile(src, dst string) error {
+func recordingPath(destDir string, started time.Time, sequence int) string {
+	ts := started.Format("2006-01-02-15-04-05")
+	name := fmt.Sprintf("omanote-%s.wav", ts)
+	if sequence > 0 {
+		name = fmt.Sprintf("omanote-%s-%d.wav", ts, sequence+1)
+	}
+	return filepath.Join(destDir, name)
+}
+
+// moveFileNoReplace moves src to dst without overwriting an existing recording.
+// A hard link avoids copying on the common same-filesystem path; copying is the
+// fallback for cross-filesystem and filesystems without hard-link support.
+func moveFileNoReplace(src, dst string) error {
+	if err := os.Link(src, dst); err == nil {
+		if err := os.Remove(src); err != nil {
+			rollbackErr := os.Remove(dst)
+			return errors.Join(err, rollbackErr)
+		}
+		return nil
+	} else if os.IsExist(err) {
+		return err
+	}
+
+	if err := copyFileExclusive(src, dst); err != nil {
+		return err
+	}
+	if err := os.Remove(src); err != nil {
+		rollbackErr := os.Remove(dst)
+		return errors.Join(err, rollbackErr)
+	}
+	return nil
+}
+
+func copyFileExclusive(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer in.Close()
 
-	out, err := os.Create(dst)
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 
 	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		os.Remove(dst)
 		return err
 	}
-	return out.Close()
+	if err := out.Sync(); err != nil {
+		out.Close()
+		os.Remove(dst)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		os.Remove(dst)
+		return err
+	}
+	return nil
 }

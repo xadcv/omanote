@@ -81,17 +81,25 @@ func newDaemonServer() *daemonServer {
 		done:     make(chan struct{}),
 	}
 	if d.runState.Running {
-		d.startMonitorLocked()
+		if err := d.startMonitorLocked(); err != nil {
+			d.err = err
+		}
 	}
 	return d
 }
 
 func (d *daemonServer) handleConn(conn net.Conn) {
 	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(controlDefaultTimeout)); err != nil {
+		return
+	}
 
 	var req controlRequest
 	if err := json.NewDecoder(conn).Decode(&req); err != nil {
 		json.NewEncoder(conn).Encode(controlResponse{OK: false, Error: err.Error(), Status: d.status()})
+		return
+	}
+	if err := conn.SetDeadline(time.Now().Add(controlTimeout(req.Command))); err != nil {
 		return
 	}
 
@@ -191,7 +199,10 @@ func (d *daemonServer) setErr(err error) {
 func (d *daemonServer) startVirtualMic(micDevice, outputDevice string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	return d.startVirtualMicLocked(micDevice, outputDevice)
+}
 
+func (d *daemonServer) startVirtualMicLocked(micDevice, outputDevice string) error {
 	if d.runState.Running {
 		return nil
 	}
@@ -221,10 +232,20 @@ func (d *daemonServer) startVirtualMic(micDevice, outputDevice string) error {
 		SysMod:           result.SysMod,
 		SavedDefaultSink: result.SavedDefaultSink,
 	}
-	d.cfg.PreferredSource = micDevice
-	d.cfg.PreferredSink = outputDevice
-	saveConfig(d.cfg)
-	d.startMonitorLocked()
+	updatedCfg := d.cfg
+	updatedCfg.PreferredSource = micDevice
+	updatedCfg.PreferredSink = outputDevice
+	if err := saveConfig(updatedCfg); err != nil {
+		cleanupErr := stopVirtualMic()
+		d.runState = RunState{}
+		return errors.Join(fmt.Errorf("save config: %w", err), cleanupErr)
+	}
+	d.cfg = updatedCfg
+	if err := d.startMonitorLocked(); err != nil {
+		cleanupErr := stopVirtualMic()
+		d.runState = RunState{}
+		return errors.Join(err, cleanupErr)
+	}
 	return nil
 }
 
@@ -252,18 +273,12 @@ func (d *daemonServer) stopVirtualMic() error {
 		d.recState = recPrompt
 	}
 	d.mon.Stop()
-	if err := stopVirtualMic(); err != nil {
-		return err
-	}
+	err := stopVirtualMic()
 	d.runState = RunState{}
-	return nil
+	return err
 }
 
 func (d *daemonServer) startRecording() error {
-	if err := d.startVirtualMic("", ""); err != nil {
-		return err
-	}
-
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if d.recState == recPrompt {
@@ -272,7 +287,25 @@ func (d *daemonServer) startRecording() error {
 	if d.recState == recOn {
 		return nil
 	}
+	wasRunning := d.runState.Running
+	if err := d.startVirtualMicLocked("", ""); err != nil {
+		return err
+	}
+	if err := d.startMonitorLocked(); err != nil {
+		if !wasRunning {
+			cleanupErr := stopVirtualMic()
+			d.runState = RunState{}
+			return errors.Join(err, cleanupErr)
+		}
+		return err
+	}
 	if err := d.rec.Start(); err != nil {
+		if !wasRunning {
+			d.mon.Stop()
+			cleanupErr := stopVirtualMic()
+			d.runState = RunState{}
+			return errors.Join(err, cleanupErr)
+		}
 		return err
 	}
 	d.recState = recOn
@@ -329,33 +362,33 @@ func (d *daemonServer) discardRecording() error {
 func (d *daemonServer) setOutputDir(dir string) error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.cfg.OutputDir = dir
-	saveConfig(d.cfg)
+	updatedCfg := d.cfg
+	updatedCfg.OutputDir = dir
+	if err := saveConfig(updatedCfg); err != nil {
+		return fmt.Errorf("save config: %w", err)
+	}
+	d.cfg = updatedCfg
 	return nil
 }
 
 func (d *daemonServer) quit() error {
-	if err := d.stopVirtualMic(); err != nil {
-		return err
-	}
-	if err := d.discardRecording(); err != nil {
-		return err
-	}
+	stopErr := d.stopVirtualMic()
+	discardErr := d.discardRecording()
 	d.stop()
-	return nil
+	return errors.Join(stopErr, discardErr)
 }
 
-func (d *daemonServer) startMonitorLocked() {
+func (d *daemonServer) startMonitorLocked() error {
 	if d.mon.IsRunning() {
-		return
+		return nil
 	}
 	if err := d.mon.Start(sinkName + ".monitor"); err != nil {
-		d.err = err
-		return
+		return fmt.Errorf("start audio monitor: %w", err)
 	}
 	d.sampleOnce.Do(func() {
 		go d.recordSamples()
 	})
+	return nil
 }
 
 func (d *daemonServer) recordSamples() {

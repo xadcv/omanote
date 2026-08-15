@@ -286,10 +286,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			key := msg.String()
 			switch key {
 			case "enter":
-				m.outputDir = m.dirInput
+				nextOutputDir := strings.TrimSpace(m.dirInput)
+				if nextOutputDir == "" {
+					m.err = fmt.Errorf("output directory cannot be empty")
+					return m, nil
+				}
+				m.outputDir = nextOutputDir
 				m.editingDir = false
-				m.cfg.OutputDir = m.outputDir
-				saveConfig(m.cfg)
 				return m, cmdDaemon("set-output-dir", m.outputDir)
 			case "escape":
 				m.editingDir = false
@@ -310,15 +313,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.mon.Stop()
 			return m, tea.Quit
 		case "v":
+			previousMode := m.vis.Mode
 			m.vis.CycleMode()
-			m.cfg.VisMode = m.vis.ModeName()
-			saveConfig(m.cfg)
+			updatedCfg := m.cfg
+			updatedCfg.VisMode = m.vis.ModeName()
+			if err := saveConfig(updatedCfg); err != nil {
+				m.vis.Mode = previousMode
+				m.err = fmt.Errorf("save config: %w", err)
+				return m, nil
+			}
+			m.cfg = updatedCfg
+			m.err = nil
 			return m, nil
 		case "c":
-			m.schemeIdx = (m.schemeIdx + 1) % len(colorSchemes)
+			nextSchemeIdx := (m.schemeIdx + 1) % len(colorSchemes)
+			updatedCfg := m.cfg
+			updatedCfg.ColorScheme = colorSchemes[nextSchemeIdx].Name
+			if err := saveConfig(updatedCfg); err != nil {
+				m.err = fmt.Errorf("save config: %w", err)
+				return m, nil
+			}
+			m.schemeIdx = nextSchemeIdx
 			m.vis.Scheme = &colorSchemes[m.schemeIdx]
-			m.cfg.ColorScheme = colorSchemes[m.schemeIdx].Name
-			saveConfig(m.cfg)
+			m.cfg = updatedCfg
+			m.err = nil
 			return m, nil
 		case "enter", " ":
 			if m.state != stateIdle {
@@ -334,9 +352,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.state = stateStarting
 			mic := m.sources[m.selectedSource].Name
 			out := m.sinks[m.selectedSink].Name
-			m.cfg.PreferredSource = mic
-			m.cfg.PreferredSink = out
-			saveConfig(m.cfg)
 			return m, tea.Batch(m.spinner.Tick, cmdDaemon("start", mic, out))
 		case "tab":
 			if m.state == stateIdle && !m.runState.Running {
