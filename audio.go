@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ const (
 	sinkName                = "OmanoteMix"
 	sourceName              = "Omanote"
 	noDeviceName            = "none"
+	pipeWireDummySinkName   = "auto_null"
 	systemLoopbackLatencyMS = "40"
 )
 
@@ -24,7 +26,8 @@ func cacheDir() string {
 		base = filepath.Join(home, ".cache")
 	}
 	dir := filepath.Join(base, "omanote")
-	os.MkdirAll(dir, 0o755)
+	os.MkdirAll(dir, 0o700)
+	os.Chmod(dir, 0o700)
 	return dir
 }
 
@@ -188,11 +191,28 @@ func runPactl(args ...string) error {
 	return nil
 }
 
+var errSinkMissing = errors.New("sink not found")
+
 func setDefaultSink(sink string) error {
 	if sink == "" {
 		return fmt.Errorf("missing sink")
 	}
 	return runPactl("set-default-sink", sink)
+}
+
+func sinkExistsChecked(name string) (bool, error) {
+	if name == "" {
+		return false, nil
+	}
+	_, err := sinkIndexByName(name)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, errSinkMissing):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 func listSinkInputs() ([]pactlSinkInput, error) {
@@ -221,7 +241,7 @@ func sinkIndexByName(name string) (int, error) {
 			return sink.Index, nil
 		}
 	}
-	return 0, fmt.Errorf("sink %q not found", name)
+	return 0, fmt.Errorf("%w: %s", errSinkMissing, name)
 }
 
 func sinkInputOwnerModule(input pactlSinkInput) string {
@@ -288,14 +308,62 @@ func restoreSystemAudioRoute(defaultSink string, skipModules ...string) error {
 	if defaultSink == "" {
 		return nil
 	}
+	defaultSinkExists, err := sinkExistsChecked(defaultSink)
+	if err != nil {
+		return fmt.Errorf("check default sink %s: %w", defaultSink, err)
+	}
+	if !defaultSinkExists {
+		return fmt.Errorf("%w: %s", errSinkMissing, defaultSink)
+	}
 	var firstErr error
 	if err := setDefaultSink(defaultSink); err != nil {
 		firstErr = fmt.Errorf("restore default sink %s: %w", defaultSink, err)
 	}
-	if err := moveSinkInputs(sinkName, defaultSink, skipModules...); err != nil && firstErr == nil {
-		firstErr = err
+	mixSinkExists, err := sinkExistsChecked(sinkName)
+	if err != nil && firstErr == nil {
+		firstErr = fmt.Errorf("check mix sink: %w", err)
+	}
+	if mixSinkExists {
+		if err := moveSinkInputs(sinkName, defaultSink, skipModules...); err != nil && firstErr == nil {
+			firstErr = err
+		}
 	}
 	return firstErr
+}
+
+func classifyRestoreErr(err error, defaultSink string, sinkPresent bool) (retry, ignore bool) {
+	if err == nil || !errors.Is(err, errSinkMissing) {
+		return false, false
+	}
+	if sinkPresent {
+		return true, false
+	}
+	if defaultSink == pipeWireDummySinkName {
+		return false, true
+	}
+	return false, false
+}
+
+// finishSinkRestore retries a missing-sink restore after OmanoteMix is gone.
+// PipeWire's dummy auto_null sink disappears while another sink is default and
+// comes back after unload.
+func finishSinkRestore(err error, defaultSink string) error {
+	if err == nil || defaultSink == "" || !errors.Is(err, errSinkMissing) {
+		return err
+	}
+	sinkPresent, checkErr := sinkExistsChecked(defaultSink)
+	if checkErr != nil {
+		return errors.Join(err, fmt.Errorf("check restored sink %s: %w", defaultSink, checkErr))
+	}
+	retry, ignore := classifyRestoreErr(err, defaultSink, sinkPresent)
+	switch {
+	case ignore:
+		return nil
+	case retry:
+		return restoreSystemAudioRoute(defaultSink)
+	default:
+		return err
+	}
 }
 
 // RunState tracks PA modules plus any default sink Omanote temporarily replaced.
@@ -630,6 +698,7 @@ func stopVirtualMic() error {
 	}
 	cleanupErr := unloadOmanoteModules()
 	os.Remove(modulesFile())
+	restoreErr = finishSinkRestore(restoreErr, state.SavedDefaultSink)
 	if restoreErr != nil {
 		return restoreErr
 	}

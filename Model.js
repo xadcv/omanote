@@ -75,10 +75,10 @@ function statusTooltip(status) {
     if (!status) return "Omanote"
     if (status.error) return String(status.error)
     var state = statusState(status)
-    if (state === "inactive") return "Omanote daemon stopped"
-    if (state === "recording") return "Omanote recording " + formatDuration(status.rec_elapsed_secs)
-    if (state === "pending") return "Omanote recording stopped; save or discard"
-    if (state === "live") return "Omanote virtual mic live"
+    if (state === "inactive") return "Omanote off"
+    if (state === "recording") return "Recording " + formatDuration(status.rec_elapsed_secs)
+    if (state === "pending") return "Recording stopped — save or discard"
+    if (state === "live") return "Virtual mic on air"
     if (state === "error") return String(status.error || "Omanote error")
     return "Omanote ready"
 }
@@ -86,7 +86,7 @@ function statusTooltip(status) {
 function statusTitle(status) {
     switch (statusState(status)) {
     case "live":
-        return "Virtual mic live"
+        return "On air"
     case "recording":
         return "Recording " + formatDuration(status.rec_elapsed_secs)
     case "pending":
@@ -94,24 +94,86 @@ function statusTitle(status) {
     case "error":
         return "Omanote error"
     case "idle":
-        return "Omanote ready"
+        return "Ready"
     default:
-        return "Omanote stopped"
+        return "Off"
     }
+}
+
+function heroCaption(status, installed) {
+    if (!installed) return "Not installed"
+    switch (statusState(status)) {
+    case "live":
+        return "On air"
+    case "recording":
+        return "Recording"
+    case "pending":
+        return "Save or discard"
+    case "error":
+        return "Error"
+    case "idle":
+        return "Ready"
+    default:
+        return "Off"
+    }
+}
+
+function heroDetail(status) {
+    if (statusState(status) === "recording")
+        return formatDuration(status.rec_elapsed_secs)
+    return ""
+}
+
+function toggleHint(live) {
+    return live ? "Stop virtual mic" : "Start virtual mic"
 }
 
 function statusIcon(state) {
     switch (String(state || "")) {
     case "live":
-        return String.fromCodePoint(0xF034C)
+        return "󰍬"
     case "recording":
-        return String.fromCodePoint(0xF044B)
+        return "󰑋"
     case "pending":
-        return String.fromCodePoint(0xF0193)
+        return "󰆓"
     case "error":
-        return String.fromCodePoint(0xF015A)
+        return "󰅚"
+    case "idle":
+        return "󰍮"
     default:
-        return String.fromCodePoint(0xF034D)
+        return "󰍭"
+    }
+}
+
+function isNoneDevice(device) {
+    var name = deviceName(device)
+    return name === "" || name.toLowerCase() === "none"
+}
+
+function sourceGlyph(device) {
+    return isNoneDevice(device) ? "󰍭" : "󰍬"
+}
+
+function sinkGlyph(device) {
+    return isNoneDevice(device) ? "󰝟" : "󰕾"
+}
+
+function actionIcon(id) {
+    switch (String(id || "")) {
+    case "start-rec":
+        return "󰑊"
+    case "stop-rec":
+        return "󰓛"
+    case "save":
+        return "󰆓"
+    case "discard":
+        return "󰆴"
+    case "open-tui":
+        return "󰆍"
+    case "quit":
+        return "󰐥"
+    default:
+        return ""
     }
 }
 

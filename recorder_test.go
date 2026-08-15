@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestRecorder_StartCreatesValidWAVHeader(t *testing.T) {
@@ -182,5 +183,84 @@ func TestRecorder_Discard(t *testing.T) {
 	// Should not be recording.
 	if rec.IsRecording() {
 		t.Error("expected IsRecording()=false after Discard")
+	}
+}
+
+func TestRecorder_SaveDoesNotOverwriteSameSecondRecording(t *testing.T) {
+	destDir := t.TempDir()
+	started := time.Date(2026, 8, 15, 13, 0, 0, 0, time.Local)
+
+	save := func(sample float64) string {
+		t.Helper()
+		var rec Recorder
+		if err := rec.Start(); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		rec.startTime = started
+		rec.WriteSamples([]float64{sample})
+		rec.Stop()
+		path, err := rec.Save(destDir)
+		if err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+		return path
+	}
+
+	first := save(0.25)
+	second := save(0.75)
+	if first == second {
+		t.Fatalf("recordings used the same path: %s", first)
+	}
+	if _, err := os.Stat(first); err != nil {
+		t.Fatalf("first recording was overwritten or removed: %v", err)
+	}
+	if _, err := os.Stat(second); err != nil {
+		t.Fatalf("second recording missing: %v", err)
+	}
+}
+
+func TestRecorder_SaveCanRetryAfterDestinationError(t *testing.T) {
+	var rec Recorder
+	if err := rec.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer rec.Discard()
+	rec.WriteSamples([]float64{0.25})
+	rec.Stop()
+
+	parent := t.TempDir()
+	notDir := filepath.Join(parent, "not-a-directory")
+	if err := os.WriteFile(notDir, []byte("x"), 0o600); err != nil {
+		t.Fatalf("create blocking file: %v", err)
+	}
+	if _, err := rec.Save(filepath.Join(notDir, "recordings")); err == nil {
+		t.Fatal("Save succeeded with an invalid destination")
+	}
+	if rec.tempPath == "" {
+		t.Fatal("failed Save discarded the pending recording path")
+	}
+	if _, err := os.Stat(rec.tempPath); err != nil {
+		t.Fatalf("pending recording missing after failed Save: %v", err)
+	}
+
+	path, err := rec.Save(filepath.Join(parent, "recordings"))
+	if err != nil {
+		t.Fatalf("retry Save: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("retried recording missing: %v", err)
+	}
+}
+
+func TestRecorder_StartRejectsPendingRecording(t *testing.T) {
+	var rec Recorder
+	if err := rec.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer rec.Discard()
+	rec.Stop()
+
+	if err := rec.Start(); err == nil {
+		t.Fatal("Start accepted a second recording while one was pending")
 	}
 }

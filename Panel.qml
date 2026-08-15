@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import qs.Commons
 import qs.Ui
@@ -15,20 +16,28 @@ Panel {
     property bool openedFromHotkey: false
     readonly property var barIdentity: hostWidget || root
     readonly property var omanote: service
-    readonly property color contentForeground: bar ? bar.foreground : Color.foreground
-    readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
-    readonly property color dim: Qt.darker(contentForeground, 1.55)
+
+    readonly property color foreground: bar ? bar.foreground : Color.foreground
+    readonly property color urgent: bar ? bar.urgent : Color.urgent
+    readonly property color dim: Qt.darker(foreground, 1.4)
+    readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
     readonly property color hoverFill: bar ? Style.hoverFillFor(bar.foreground, Color.accent) : "transparent"
+    readonly property color selectedFill: bar ? Style.selectedFillFor(bar.foreground, Color.accent) : "transparent"
 
     property string selectedSource: ""
     property string selectedSink: ""
     property bool selectionTouched: false
-    property string focusSection: "actions"
-    property int selectedIndex: 0
+    property string focusSection: "header"
+    property int selectedIndex: -1
     property bool cursorActive: false
 
-    readonly property var actionItems: visibleActions()
+    readonly property var recordingItems: visibleRecordingItems()
+    readonly property var extraItems: visibleExtraItems()
+    readonly property var moreItems: extraItems.length > 1 ? extraItems.slice(1) : []
     readonly property bool devicesEditable: service.installed && !service.live && service.recState !== "recording"
+    readonly property bool headerHasCursor: cursorActive && focusSection === "header" && service.installed
+    readonly property bool heroActive: service.live || service.recState === "recording" || service.recState === "pending"
+    readonly property string toggleHint: Model.toggleHint(service.live)
 
     function open() {
         openedFromHotkey = false
@@ -91,25 +100,29 @@ Panel {
         root.selectionTouched = true
     }
 
-    function visibleActions() {
+    function visibleRecordingItems() {
         var items = []
         if (!service.installed) return items
         if (service.recState === "pending") {
-            items.push({ id: "save", label: "Save recording" })
-            items.push({ id: "discard", label: "Discard recording" })
+            items.push({ id: "save", label: "Save recording", icon: Model.actionIcon("save") })
+            items.push({ id: "discard", label: "Discard recording", icon: Model.actionIcon("discard") })
+            return items
         }
-        if (service.live) {
-            items.push({ id: "stop-mic", label: "Stop virtual mic" })
-            if (service.recState === "recording")
-                items.push({ id: "stop-rec", label: "Stop recording" })
-            else if (service.recState !== "pending")
-                items.push({ id: "start-rec", label: "Start recording" })
-        } else {
-            items.push({ id: "start-mic", label: "Start virtual mic" })
-        }
-        items.push({ id: "open-tui", label: "Open TUI" })
+        if (!service.live) return items
+        if (service.recState === "recording")
+            items.push({ id: "stop-rec", label: "Stop recording", icon: Model.actionIcon("stop-rec") })
+        else
+            items.push({ id: "start-rec", label: "Start recording", icon: Model.actionIcon("start-rec") })
+        return items
+    }
+
+    function visibleExtraItems() {
+        var items = []
+        if (!service.installed) return items
+        items.push({ id: "autostart", label: "Start on login", icon: "" })
+        items.push({ id: "open-tui", label: "Open TUI", icon: Model.actionIcon("open-tui") })
         if (service.status && service.status.daemon_running)
-            items.push({ id: "quit", label: "Quit daemon" })
+            items.push({ id: "quit", label: "Quit daemon", icon: Model.actionIcon("quit") })
         return items
     }
 
@@ -140,29 +153,39 @@ Panel {
         case "quit":
             service.quitDaemon()
             break
+        case "autostart":
+            service.setAutostart(!(service.status && service.status.autostart))
+            break
         }
     }
 
     function sectionCount(section) {
-        if (section === "actions") return actionItems.length
+        if (section === "recording") return recordingItems.length
         if (section === "sources") return service.sources.length
         if (section === "sinks") return service.sinks.length
-        if (section === "footer") return 1
+        if (section === "extras") return extraItems.length
         return 0
     }
 
-    function sectionVisible(section) {
-        return sectionCount(section) > 0
+    function visibleSectionOrder() {
+        var order = []
+        if (recordingItems.length > 0) order.push("recording")
+        if (service.sources.length > 0) order.push("sources")
+        if (service.sinks.length > 0) order.push("sinks")
+        if (extraItems.length > 0) order.push("extras")
+        return order
     }
 
-    function nextSection(section, direction) {
-        var order = ["actions", "sources", "sinks", "footer"]
-        var index = order.indexOf(section)
-        for (var step = 0; step < order.length; step++) {
-            index = (index + direction + order.length) % order.length
-            if (sectionVisible(order[index])) return order[index]
-        }
-        return section
+    function setHeaderCursor() {
+        cursorActive = true
+        focusSection = "header"
+        selectedIndex = -1
+    }
+
+    function setRowCursor(section, index) {
+        cursorActive = true
+        focusSection = section
+        selectedIndex = index
     }
 
     function moveCursor(dx, dy) {
@@ -170,45 +193,105 @@ Panel {
             cursorActive = true
             return
         }
-        if (dy !== 0) {
-            var count = sectionCount(focusSection)
-            if (count <= 0) {
-                focusSection = nextSection(focusSection, dy)
-                selectedIndex = 0
-                return
+        if (dy === 0) return
+
+        if (focusSection === "header") {
+            if (dy > 0) {
+                var first = visibleSectionOrder()
+                if (first.length > 0) {
+                    focusSection = first[0]
+                    selectedIndex = 0
+                }
             }
-            var next = selectedIndex + dy
-            if (next < 0) {
-                focusSection = nextSection(focusSection, -1)
+            return
+        }
+
+        var count = sectionCount(focusSection)
+        var next = selectedIndex + dy
+        if (next >= 0 && next < count) {
+            selectedIndex = next
+            return
+        }
+
+        var sections = visibleSectionOrder()
+        var sIdx = sections.indexOf(focusSection)
+        if (next < 0) {
+            if (sIdx > 0) {
+                focusSection = sections[sIdx - 1]
                 selectedIndex = Math.max(0, sectionCount(focusSection) - 1)
-            } else if (next >= count) {
-                focusSection = nextSection(focusSection, 1)
-                selectedIndex = 0
             } else {
-                selectedIndex = next
+                focusSection = "header"
+                selectedIndex = -1
             }
+        } else if (sIdx >= 0 && sIdx < sections.length - 1) {
+            focusSection = sections[sIdx + 1]
+            selectedIndex = 0
         }
     }
 
     function activateCursor() {
-        if (focusSection === "actions" && actionItems[selectedIndex])
-            runAction(actionItems[selectedIndex].id)
+        if (focusSection === "header") {
+            if (service.installed) service.toggleMic(root.selectedSource, root.selectedSink)
+            return
+        }
+        if (focusSection === "recording" && recordingItems[selectedIndex])
+            runAction(recordingItems[selectedIndex].id)
         else if (focusSection === "sources" && service.sources[selectedIndex])
             selectSource(Model.deviceName(service.sources[selectedIndex]))
         else if (focusSection === "sinks" && service.sinks[selectedIndex])
             selectSink(Model.deviceName(service.sinks[selectedIndex]))
-        else if (focusSection === "footer")
-            service.setAutostart(!(service.status && service.status.autostart))
+        else if (focusSection === "extras" && extraItems[selectedIndex])
+            runAction(extraItems[selectedIndex].id)
+    }
+
+    function clampCursor() {
+        if (focusSection === "header") return
+        var sections = visibleSectionOrder()
+        if (!sections.length) {
+            focusSection = "header"
+            selectedIndex = -1
+            return
+        }
+        if (sections.indexOf(focusSection) < 0) {
+            focusSection = sections[0]
+            selectedIndex = 0
+            return
+        }
+        var count = sectionCount(focusSection)
+        if (selectedIndex > count - 1) selectedIndex = Math.max(0, count - 1)
+        if (selectedIndex < 0) selectedIndex = 0
+    }
+
+    function ensureCursorVisible(item) {
+        if (!item || !panelFlick) return
+        var margin = 6
+        var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height)
+        if (maxY <= Style.space(24) || focusSection === "header") {
+            panelFlick.contentY = 0
+            return
+        }
+        var pt = item.mapToItem(panelFlick.contentItem, 0, 0)
+        var top = pt.y
+        var bottom = top + (item.height || 0)
+        var viewTop = panelFlick.contentY
+        var viewBottom = viewTop + panelFlick.height
+        if (top < viewTop + margin)
+            panelFlick.contentY = Math.max(0, Math.min(maxY, top - margin))
+        else if (bottom > viewBottom - margin)
+            panelFlick.contentY = Math.max(0, Math.min(maxY, bottom + margin - panelFlick.height))
     }
 
     onOpenedChanged: if (opened) {
         cursorActive = false
-        focusSection = "actions"
-        selectedIndex = 0
+        focusSection = "header"
+        selectedIndex = -1
         if (panelFlick) panelFlick.contentY = 0
         service.refreshAll()
         Qt.callLater(function() { if (keyCatcher) keyCatcher.forceActiveFocus() })
     }
+
+    onRecordingItemsChanged: clampCursor()
+    onExtraItemsChanged: clampCursor()
 
     Service {
         id: service
@@ -217,6 +300,8 @@ Panel {
     Connections {
         target: service
         function onStatusChanged() { root.syncSelectionFromStatus() }
+        function onSourcesChanged() { root.clampCursor() }
+        function onSinksChanged() { root.clampCursor() }
     }
 
     KeyboardPanel {
@@ -226,7 +311,7 @@ Panel {
         bar: root.bar
         open: root.opened
         focusTarget: keyCatcher
-        contentWidth: panel.fittedContentWidth(Style.space(320))
+        contentWidth: panel.fittedContentWidth(Style.space(380))
         contentHeight: panel.fittedContentHeight(content.implicitHeight, Style.space(560))
 
         PanelKeyCatcher {
@@ -262,240 +347,404 @@ Panel {
                 boundsBehavior: Flickable.StopAtBounds
                 flickableDirection: Flickable.VerticalFlick
                 interactive: contentHeight > height
+                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                 Column {
                     id: content
                     width: panelFlick.width
                     spacing: Style.space(12)
 
-                    Column {
+                    Item {
+                        id: header
                         width: parent.width
-                        spacing: Style.space(4)
+                        implicitHeight: hero.implicitHeight
+                        readonly property bool ringVisible: root.headerHasCursor
+                        function focusHero() { root.setHeaderCursor() }
 
-                        Text {
+                        PanelHero {
+                            id: hero
                             width: parent.width
-                            text: service.installed ? Model.statusTitle(service.status) : "Omanote not installed"
-                            color: root.contentForeground
-                            font.family: root.contentFontFamily
-                            font.pixelSize: Style.font.subtitle
-                            font.bold: true
-                            wrapMode: Text.WordWrap
-                        }
-
-                        Text {
-                            width: parent.width
-                            visible: service.installed
-                            text: service.actionStatus || service.lastError || Model.statusTooltip(service.status)
-                            color: service.lastError ? (root.bar && root.bar.urgent ? root.bar.urgent : root.contentForeground) : root.dim
-                            font.family: root.contentFontFamily
-                            font.pixelSize: Style.font.body
-                            wrapMode: Text.WordWrap
-                        }
-
-                        Text {
-                            width: parent.width
-                            visible: !service.installed
-                            text: "Install the omanote binary, then restart the shell. The bar widget talks to that CLI."
-                            color: root.dim
-                            font.family: root.contentFontFamily
-                            font.pixelSize: Style.font.body
-                            wrapMode: Text.WordWrap
-                        }
-                    }
-
-                    Column {
-                        width: parent.width
-                        spacing: Style.space(2)
-                        visible: service.installed && root.actionItems.length > 0
-
-                        Repeater {
-                            model: root.actionItems
-
-                            Rectangle {
-                                required property var modelData
-                                required property int index
-                                width: parent.width
-                                implicitHeight: actionLabel.implicitHeight + Style.space(12)
-                                radius: Style.cornerRadius
-                                color: (actionArea.containsMouse || (root.cursorActive && root.focusSection === "actions" && root.selectedIndex === index)) ? root.hoverFill : "transparent"
-
+                            title: "Omanote"
+                            meta: Model.heroCaption(service.status, service.installed)
+                            detail: Model.heroDetail(service.status)
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                            iconOpacity: root.heroActive || !!service.lastError ? 1.0 : 0.5
+                            iconComponent: Component {
                                 Text {
-                                    id: actionLabel
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    anchors.leftMargin: Style.space(8)
-                                    anchors.rightMargin: Style.space(8)
-                                    text: modelData.label
-                                    color: root.contentForeground
-                                    font.family: root.contentFontFamily
-                                    font.pixelSize: Style.font.body
-                                    elide: Text.ElideRight
+                                    text: service.installed ? Model.statusIcon(service.state) : "󰍭"
+                                    color: root.foreground
+                                    font.family: root.fontFamily
+                                    font.pixelSize: Style.font.display
                                 }
+                            }
+                            trailingControl: Component {
+                                ToggleSwitch {
+                                    id: powerSwitch
+                                    visible: service.installed
+                                    checked: service.live
+                                    busy: service.busy
+                                    hasCursor: header.ringVisible
+                                    foreground: hero.foreground
+                                    onHovered: function(on) { if (on) header.focusHero() }
+                                    onToggled: service.toggleMic(root.selectedSource, root.selectedSink)
 
-                                MouseArea {
-                                    id: actionArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onContainsMouseChanged: if (containsMouse) {
-                                        root.cursorActive = true
-                                        root.focusSection = "actions"
-                                        root.selectedIndex = index
+                                    PanelToolTip {
+                                        visible: powerSwitch.containsMouse
+                                        text: root.toggleHint
+                                        fontFamily: hero.fontFamily
                                     }
-                                    onClicked: root.runAction(modelData.id)
                                 }
                             }
                         }
                     }
 
-                    Column {
+                    Text {
+                        visible: service.actionStatus !== "" || service.lastError !== ""
                         width: parent.width
-                        spacing: Style.space(2)
-                        visible: service.installed && service.sources.length > 0
+                        text: service.actionStatus !== "" ? service.actionStatus : service.lastError
+                        color: service.lastError !== "" && service.actionStatus === "" ? root.urgent : root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        wrapMode: Text.WordWrap
+                    }
 
-                        Text {
-                            text: "MICROPHONE"
-                            color: root.dim
-                            font.family: root.contentFontFamily
-                            font.pixelSize: Style.font.bodySmall
-                            font.letterSpacing: 1
+                    Text {
+                        visible: !service.installed
+                        width: parent.width
+                        text: "Install the omanote binary, then restart the shell."
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        wrapMode: Text.WordWrap
+                    }
+
+                    PanelSeparator {
+                        visible: service.installed && root.recordingItems.length > 0
+                        foreground: root.foreground
+                    }
+
+                    Column {
+                        visible: service.installed && root.recordingItems.length > 0
+                        width: parent.width
+                        spacing: Style.space(6)
+
+                        PanelSectionHeader {
+                            text: "RECORDING"
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                        }
+
+                        Repeater {
+                            model: root.recordingItems
+                            ActionRow {
+                                required property var modelData
+                                required property int index
+                                width: content.width
+                                item: modelData
+                                rowIndex: index
+                                sectionName: "recording"
+                            }
+                        }
+                    }
+
+                    PanelSeparator {
+                        visible: service.installed && service.sources.length > 0
+                        foreground: root.foreground
+                    }
+
+                    Column {
+                        visible: service.installed && service.sources.length > 0
+                        width: parent.width
+                        spacing: Style.space(6)
+                        opacity: root.devicesEditable ? 1 : 0.55
+
+                        Item {
+                            width: parent.width
+                            implicitHeight: Math.max(inputHeader.implicitHeight, inputLock.implicitHeight)
+
+                            PanelSectionHeader {
+                                id: inputHeader
+                                text: "INPUT"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            Text {
+                                id: inputLock
+                                visible: !root.devicesEditable
+                                text: "LOCKED"
+                                color: root.dim
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                                font.bold: true
+                                font.letterSpacing: 1.2
+                                anchors.right: parent.right
+                                anchors.rightMargin: Style.space(6)
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
                         }
 
                         Repeater {
                             model: service.sources
-
-                            Rectangle {
+                            DeviceRow {
                                 required property var modelData
                                 required property int index
-                                width: parent.width
-                                implicitHeight: sourceLabel.implicitHeight + Style.space(10)
-                                radius: Style.cornerRadius
-                                opacity: root.devicesEditable ? 1 : 0.55
-                                color: (sourceArea.containsMouse || (root.cursorActive && root.focusSection === "sources" && root.selectedIndex === index)) ? root.hoverFill : "transparent"
-
-                                Text {
-                                    id: sourceLabel
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    anchors.leftMargin: Style.space(8)
-                                    anchors.rightMargin: Style.space(8)
-                                    text: Model.deviceLabel(modelData)
-                                    color: root.contentForeground
-                                    font.family: root.contentFontFamily
-                                    font.pixelSize: Style.font.body
-                                    font.bold: Model.isSelectedDevice(modelData, root.selectedSource)
-                                    elide: Text.ElideRight
-                                }
-
-                                MouseArea {
-                                    id: sourceArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: root.devicesEditable ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onContainsMouseChanged: if (containsMouse) {
-                                        root.cursorActive = true
-                                        root.focusSection = "sources"
-                                        root.selectedIndex = index
-                                    }
-                                    onClicked: root.selectSource(Model.deviceName(modelData))
-                                }
+                                width: content.width
+                                device: modelData
+                                rowIndex: index
+                                sectionName: "sources"
+                                glyph: Model.sourceGlyph(modelData)
+                                selected: Model.isSelectedDevice(modelData, root.selectedSource)
+                                onChosen: root.selectSource(Model.deviceName(device))
                             }
                         }
                     }
 
-                    Column {
-                        width: parent.width
-                        spacing: Style.space(2)
+                    PanelSeparator {
                         visible: service.installed && service.sinks.length > 0
+                        foreground: root.foreground
+                    }
 
-                        Text {
-                            text: "SYSTEM OUTPUT"
-                            color: root.dim
-                            font.family: root.contentFontFamily
-                            font.pixelSize: Style.font.bodySmall
-                            font.letterSpacing: 1
+                    Column {
+                        visible: service.installed && service.sinks.length > 0
+                        width: parent.width
+                        spacing: Style.space(6)
+                        opacity: root.devicesEditable ? 1 : 0.55
+
+                        Item {
+                            width: parent.width
+                            implicitHeight: Math.max(outputHeader.implicitHeight, outputLock.implicitHeight)
+
+                            PanelSectionHeader {
+                                id: outputHeader
+                                text: "OUTPUT"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
+
+                            Text {
+                                id: outputLock
+                                visible: !root.devicesEditable
+                                text: "LOCKED"
+                                color: root.dim
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                                font.bold: true
+                                font.letterSpacing: 1.2
+                                anchors.right: parent.right
+                                anchors.rightMargin: Style.space(6)
+                                anchors.verticalCenter: parent.verticalCenter
+                            }
                         }
 
                         Repeater {
                             model: service.sinks
-
-                            Rectangle {
+                            DeviceRow {
                                 required property var modelData
                                 required property int index
-                                width: parent.width
-                                implicitHeight: sinkLabel.implicitHeight + Style.space(10)
-                                radius: Style.cornerRadius
-                                opacity: root.devicesEditable ? 1 : 0.55
-                                color: (sinkArea.containsMouse || (root.cursorActive && root.focusSection === "sinks" && root.selectedIndex === index)) ? root.hoverFill : "transparent"
-
-                                Text {
-                                    id: sinkLabel
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    anchors.leftMargin: Style.space(8)
-                                    anchors.rightMargin: Style.space(8)
-                                    text: Model.deviceLabel(modelData)
-                                    color: root.contentForeground
-                                    font.family: root.contentFontFamily
-                                    font.pixelSize: Style.font.body
-                                    font.bold: Model.isSelectedDevice(modelData, root.selectedSink)
-                                    elide: Text.ElideRight
-                                }
-
-                                MouseArea {
-                                    id: sinkArea
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: root.devicesEditable ? Qt.PointingHandCursor : Qt.ArrowCursor
-                                    onContainsMouseChanged: if (containsMouse) {
-                                        root.cursorActive = true
-                                        root.focusSection = "sinks"
-                                        root.selectedIndex = index
-                                    }
-                                    onClicked: root.selectSink(Model.deviceName(modelData))
-                                }
+                                width: content.width
+                                device: modelData
+                                rowIndex: index
+                                sectionName: "sinks"
+                                glyph: Model.sinkGlyph(modelData)
+                                selected: Model.isSelectedDevice(modelData, root.selectedSink)
+                                onChosen: root.selectSink(Model.deviceName(device))
                             }
                         }
                     }
 
-                    Rectangle {
-                        width: parent.width
-                        implicitHeight: autostartLabel.implicitHeight + Style.space(12)
-                        radius: Style.cornerRadius
-                        visible: service.installed
-                        color: (autostartArea.containsMouse || (root.cursorActive && root.focusSection === "footer")) ? root.hoverFill : "transparent"
+                    PanelSeparator {
+                        visible: service.installed && root.extraItems.length > 0
+                        foreground: root.foreground
+                    }
 
-                        Text {
-                            id: autostartLabel
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            anchors.leftMargin: Style.space(8)
-                            anchors.rightMargin: Style.space(8)
-                            text: (service.status && service.status.autostart) ? "Start on login: on" : "Start on login: off"
-                            color: root.contentForeground
-                            font.family: root.contentFontFamily
-                            font.pixelSize: Style.font.body
+                    Column {
+                        visible: service.installed && root.extraItems.length > 0
+                        width: parent.width
+                        spacing: Style.space(6)
+
+                        AutostartRow {
+                            width: content.width
+                            item: root.extraItems.length > 0 ? root.extraItems[0] : ({})
+                            rowIndex: 0
+                            sectionName: "extras"
                         }
 
-                        MouseArea {
-                            id: autostartArea
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onContainsMouseChanged: if (containsMouse) {
-                                root.cursorActive = true
-                                root.focusSection = "footer"
-                                root.selectedIndex = 0
+                        Repeater {
+                            model: root.moreItems
+                            ActionRow {
+                                required property var modelData
+                                required property int index
+                                width: content.width
+                                item: modelData
+                                rowIndex: index + 1
+                                sectionName: "extras"
                             }
-                            onClicked: service.setAutostart(!(service.status && service.status.autostart))
                         }
                     }
                 }
             }
         }
     }
+
+    component ActionRow: CursorSurface {
+        id: actionRow
+        property var item: ({})
+        property int rowIndex: 0
+        property string sectionName: "recording"
+
+        hasCursor: root.cursorActive && root.focusSection === sectionName && root.selectedIndex === rowIndex
+        onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(actionRow)
+        foreground: root.foreground
+        fill: root.hoverFill
+        implicitHeight: actionInner.implicitHeight + Style.spacing.xl
+
+        Row {
+            id: actionInner
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.space(6)
+            anchors.rightMargin: Style.space(6)
+            spacing: Style.space(8)
+
+            Text {
+                visible: actionRow.item && actionRow.item.icon
+                text: actionRow.item && actionRow.item.icon ? actionRow.item.icon : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                width: Style.space(22)
+                horizontalAlignment: Text.AlignHCenter
+                anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
+                text: actionRow.item && actionRow.item.label ? actionRow.item.label : ""
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                elide: Text.ElideRight
+                width: parent.width - (actionRow.item && actionRow.item.icon ? Style.space(30) : 0)
+                anchors.verticalCenter: parent.verticalCenter
+            }
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) root.setRowCursor(actionRow.sectionName, actionRow.rowIndex)
+            onClicked: root.runAction(actionRow.item ? actionRow.item.id : "")
+        }
+    }
+
+    component AutostartRow: CursorSurface {
+        id: autostartRow
+        property var item: ({})
+        property int rowIndex: 0
+        property string sectionName: "extras"
+        readonly property bool enabled: !!(service.status && service.status.autostart)
+
+        hasCursor: root.cursorActive && root.focusSection === sectionName && root.selectedIndex === rowIndex
+        onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(autostartRow)
+        foreground: root.foreground
+        fill: root.hoverFill
+        implicitHeight: Math.max(autostartLabel.implicitHeight, autostartSwitch.implicitHeight) + Style.spacing.xl
+
+        Text {
+            id: autostartLabel
+            anchors.left: parent.left
+            anchors.right: autostartSwitch.left
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.space(6)
+            anchors.rightMargin: Style.space(12)
+            text: "Start on login"
+            color: root.foreground
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            elide: Text.ElideRight
+        }
+
+        ToggleSwitch {
+            id: autostartSwitch
+            checked: autostartRow.enabled
+            interactive: false
+            foreground: root.foreground
+            anchors.right: parent.right
+            anchors.rightMargin: Style.space(6)
+            anchors.verticalCenter: parent.verticalCenter
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onContainsMouseChanged: if (containsMouse) root.setRowCursor(autostartRow.sectionName, autostartRow.rowIndex)
+            onClicked: root.runAction("autostart")
+        }
+    }
+
+    component DeviceRow: CursorSurface {
+        id: deviceRow
+        property var device: null
+        property int rowIndex: 0
+        property string sectionName: "sources"
+        property string glyph: ""
+        property bool selected: false
+        signal chosen()
+
+        hasCursor: root.cursorActive && root.focusSection === sectionName && root.selectedIndex === rowIndex
+        onHasCursorChanged: if (hasCursor) root.ensureCursorVisible(deviceRow)
+        current: selected
+        foreground: root.foreground
+        fill: root.hoverFill
+        currentFill: root.selectedFill
+        implicitHeight: deviceInner.implicitHeight + Style.spacing.xl
+
+        Row {
+            id: deviceInner
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.leftMargin: Style.space(6)
+            anchors.rightMargin: Style.space(6)
+            spacing: Style.space(8)
+
+            Text {
+                text: deviceRow.glyph
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.title
+                width: Style.space(22)
+                horizontalAlignment: Text.AlignHCenter
+                anchors.verticalCenter: parent.verticalCenter
+            }
+
+            Text {
+                text: Model.deviceLabel(deviceRow.device)
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: deviceRow.selected
+                elide: Text.ElideRight
+                width: parent.width - Style.space(22) - Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+            }
+        }
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: root.devicesEditable ? Qt.PointingHandCursor : Qt.ArrowCursor
+            onContainsMouseChanged: if (containsMouse) root.setRowCursor(deviceRow.sectionName, deviceRow.rowIndex)
+            onClicked: deviceRow.chosen()
+        }
+    }
+
 }

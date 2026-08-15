@@ -88,6 +88,7 @@ BarWidget {
         text: root.iconText
         slotSize: Style.bar.statusSlot
         tooltipText: root.tooltip
+        active: root.omanote && root.omanote.recState === "recording"
 
         onPressed: function(buttonCode) {
             if (buttonCode === Qt.RightButton) {

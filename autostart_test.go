@@ -6,8 +6,8 @@ import (
 )
 
 func TestRenderAutostartServiceQuotesExecutable(t *testing.T) {
-	got := renderAutostartService("/tmp/Omanote Build/omanote")
-	if !strings.Contains(got, `ExecStart="/tmp/Omanote Build/omanote" daemon`) {
+	got := renderAutostartService("/tmp/Omanote 100% Build/omanote")
+	if !strings.Contains(got, `ExecStart="/tmp/Omanote 100%% Build/omanote" daemon`) {
 		t.Fatalf("service file did not quote executable path:\n%s", got)
 	}
 	if !strings.Contains(got, "WantedBy=default.target") {

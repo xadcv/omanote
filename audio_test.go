@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -89,6 +91,35 @@ func TestOmanoteModuleIDsFromShortFindsCurrentAndLegacyModules(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("omanoteModuleIDsFromShort() = %#v, want %#v", got, want)
 		}
+	}
+}
+
+func TestClassifyRestoreErrForMissingDummySink(t *testing.T) {
+	missing := fmt.Errorf("%w: auto_null", errSinkMissing)
+	retry, ignore := classifyRestoreErr(missing, pipeWireDummySinkName, false)
+	if retry || !ignore {
+		t.Fatalf("missing sink gone: retry=%v ignore=%v, want ignore", retry, ignore)
+	}
+
+	retry, ignore = classifyRestoreErr(missing, pipeWireDummySinkName, true)
+	if !retry || ignore {
+		t.Fatalf("missing sink returned: retry=%v ignore=%v, want retry", retry, ignore)
+	}
+
+	other := errors.New("restore default sink auto_null: exit status 1")
+	retry, ignore = classifyRestoreErr(other, pipeWireDummySinkName, false)
+	if retry || ignore {
+		t.Fatalf("other error: retry=%v ignore=%v, want keep", retry, ignore)
+	}
+
+	retry, ignore = classifyRestoreErr(nil, pipeWireDummySinkName, false)
+	if retry || ignore {
+		t.Fatalf("nil error: retry=%v ignore=%v, want keep", retry, ignore)
+	}
+
+	retry, ignore = classifyRestoreErr(missing, "alsa_output.usb", false)
+	if retry || ignore {
+		t.Fatalf("missing physical sink: retry=%v ignore=%v, want error preserved", retry, ignore)
 	}
 }
 
