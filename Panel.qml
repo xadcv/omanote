@@ -41,9 +41,9 @@ Panel {
 
     function open() {
         openedFromHotkey = false
-        setCenterHoverRevealSuppressed(false)
         service.refreshAll()
         root.controller.show()
+        setCenterHoverRevealSuppressed(false)
     }
 
     function openFromHotkey() {
@@ -56,8 +56,11 @@ Panel {
     }
 
     function close() {
-        setCenterHoverRevealSuppressed(false)
+        // hide() first: the hover-reveal call below is cosmetic and must never
+        // be able to abort the close, which would leave the panel's
+        // full-screen input-grabbing layer mapped with no way to dismiss it.
         root.controller.hide()
+        setCenterHoverRevealSuppressed(false)
     }
 
     function toggle() {
@@ -72,7 +75,9 @@ Panel {
     }
 
     function setCenterHoverRevealSuppressed(value) {
-        if (root.bar && "centerHoverRevealSuppressed" in root.bar)
+        if (root.bar && typeof root.bar.setCenterHoverRevealSuppressed === "function")
+            root.bar.setCenterHoverRevealSuppressed(value)
+        else if (root.bar && "centerHoverRevealSuppressed" in root.bar)
             root.bar.centerHoverRevealSuppressed = value
     }
 
